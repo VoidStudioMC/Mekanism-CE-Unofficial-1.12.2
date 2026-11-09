@@ -1,14 +1,23 @@
 package mekanism.common.multiblock;
 
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import mekanism.api.AutomationType;
 import mekanism.api.Coord4D;
-import mekanism.common.util.NonNullListSynchronized;
-import net.minecraft.item.ItemStack;
+import mekanism.api.energy.IEnergyContainer;
+import mekanism.api.fluid.IExtendedFluidTank;
+import mekanism.api.gas.IExtendedGasTank;
+import mekanism.api.heat.IHeatHandler;
+import mekanism.api.inventory.IInventorySlot;
+import mekanism.api.inventory.IMekanismInventory;
+import mekanism.common.tile.TileEntityStructuralGlass;
+import net.minecraft.util.EnumFacing;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.util.Set;
+import java.util.*;
+import java.util.function.BiPredicate;
 
-public abstract class SynchronizedData<T extends SynchronizedData<T>> {
+public abstract class SynchronizedData<T extends SynchronizedData<T>> implements IMekanismInventory {
 
     public Set<Coord4D> locations = new ObjectOpenHashSet<>();
 
@@ -26,6 +35,8 @@ public abstract class SynchronizedData<T extends SynchronizedData<T>> {
 
     public boolean hasRenderer;
 
+    private long lastServerTick = Long.MIN_VALUE;
+
     @Nullable//may be null if structure has not been fully sent
     public Coord4D renderLocation;
 
@@ -33,11 +44,120 @@ public abstract class SynchronizedData<T extends SynchronizedData<T>> {
     public Coord4D maxLocation;
 
     public boolean destroyed;
+    private boolean formed;
+    // Runtime derived state. Never copied/merged with persistent inventory ownership.
+    private volatile int currentRedstoneLevel;
+    private long comparatorSampleTick = Long.MIN_VALUE;
+    private final Set<TileEntityStructuralGlass> structuralGlass = Collections.newSetFromMap(new IdentityHashMap<>());
 
     public Set<Coord4D> internalLocations = new ObjectOpenHashSet<>();
 
-    public NonNullListSynchronized<ItemStack> getInventory() {
-        return null;
+    protected final List<IInventorySlot> inventorySlots = new ArrayList<>();
+    protected final List<IExtendedFluidTank> fluidTanks = new ArrayList<>();
+    protected final List<IExtendedGasTank> gasTanks = new ArrayList<>();
+    protected final List<IEnergyContainer> energyContainers = new ArrayList<>();
+    protected final List<IHeatHandler> heatHandlers = new ArrayList<>();
+
+    private final BiPredicate<Object, AutomationType> formedBiPred = (stack, automationType) -> isFormed();
+    private final BiPredicate<Object, AutomationType> notExternalFormedBiPred = (stack, automationType) -> automationType != AutomationType.EXTERNAL && isFormed();
+
+    @SuppressWarnings("unchecked")
+    public <V> BiPredicate<V, AutomationType> formedBiPred() {
+        return (BiPredicate<V, AutomationType>) formedBiPred;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <V> BiPredicate<V, AutomationType> notExternalFormedBiPred() {
+        return (BiPredicate<V, AutomationType>) notExternalFormedBiPred;
+    }
+
+    @Nonnull
+    @Override
+    public List<IInventorySlot> getInventorySlots(@Nullable EnumFacing side) {
+        return isFormed() ? inventorySlots : Collections.emptyList();
+    }
+
+    @Nonnull
+    public List<IExtendedFluidTank> getFluidTanks(@Nullable EnumFacing side) {
+        return isFormed() ? fluidTanks : Collections.emptyList();
+    }
+
+    @Nonnull
+    public List<IExtendedGasTank> getGasTanks(@Nullable EnumFacing side) {
+        return isFormed() ? gasTanks : Collections.emptyList();
+    }
+
+    @Nonnull
+    public List<IEnergyContainer> getEnergyContainers(@Nullable EnumFacing side) {
+        return isFormed() ? energyContainers : Collections.emptyList();
+    }
+
+    @Nonnull
+    public List<IHeatHandler> getHeatHandlers(@Nullable EnumFacing side) {
+        return isFormed() ? heatHandlers : Collections.emptyList();
+    }
+
+    @Override
+    public boolean hasInventory() {
+        return isFormed() && !inventorySlots.isEmpty();
+    }
+
+    @Override
+    public void onContentsChanged() {
+    }
+
+    public List<IInventorySlot> getInternalInventorySlots() {
+        return Collections.unmodifiableList(inventorySlots);
+    }
+
+    public boolean isFormed() {
+        return formed && !destroyed;
+    }
+
+    public int getCurrentRedstoneLevel() {
+        return isFormed() ? currentRedstoneLevel : 0;
+    }
+
+    /**
+     * Server tick only. All valves share one sample; legacy public contents can change
+     * without a listener, so sample once each tick rather than relying on dirty callbacks.
+     * Changes after the sample are observed next tick. Block reads never trigger sampling.
+     */
+    public final void refreshComparatorLevel(long gameTime) {
+        if (comparatorSampleTick != gameTime) {
+            comparatorSampleTick = gameTime;
+            currentRedstoneLevel = isFormed() ? getMultiblockRedstoneLevel() : 0;
+        }
+    }
+
+    protected int getMultiblockRedstoneLevel() {
+        return 0;
+    }
+
+    public void setFormed(boolean formed) {
+        this.formed = formed;
+        comparatorSampleTick = Long.MIN_VALUE;
+        currentRedstoneLevel = isFormed() ? getMultiblockRedstoneLevel() : 0;
+        if (!formed) {
+            for (TileEntityStructuralGlass glass : structuralGlass) glass.clearController(this);
+            structuralGlass.clear();
+        }
+    }
+
+    public void bindStructuralGlass(TileEntityStructuralGlass glass, Coord4D controller) {
+        glass.setController(controller, this);
+        structuralGlass.add(glass);
+    }
+
+    /**
+     * Claims ownership of structure-wide processing for the given server tick.
+     */
+    public boolean tryClaimServerTick(long gameTime) {
+        if (lastServerTick == gameTime) {
+            return false;
+        }
+        lastServerTick = gameTime;
+        return true;
     }
 
     @Override

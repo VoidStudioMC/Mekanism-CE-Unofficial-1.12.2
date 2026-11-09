@@ -1,33 +1,50 @@
 package mekanism.generators.common.tile;
 
 import io.netty.buffer.ByteBuf;
-import mekanism.api.Coord4D;
-import mekanism.api.TileNetworkList;
+import mekanism.api.*;
 import mekanism.common.base.IBoundingBlock;
-import mekanism.common.base.IMachineSlotTip;
+import mekanism.common.base.ISpecialSelectionWireframeTile;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.util.ChargeUtils;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
 import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.NonNullListSynchronized;
-import net.minecraft.item.ItemStack;
-import net.minecraft.util.EnumFacing;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.IBlockAccess;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
+import java.util.List;
 
-public class TileEntityWindGenerator extends TileEntityGenerator implements IBoundingBlock , IMachineSlotTip {
+public class TileEntityWindGenerator extends TileEntityGenerator implements IBoundingBlock, ISpecialSelectionWireframeTile {
+
+    private static final int RENDER_HORIZONTAL_RADIUS = 2;
+    private static final int RENDER_HEIGHT = 7;
 
     public static final float SPEED = 32F;
     public static final float SPEED_SCALED = 256F / SPEED;
     static final String[] methods = new String[]{"getEnergy", "getOutput", "getMaxEnergy", "getEnergyNeeded", "getMultiplier"};
-    private static final int[] SLOTS = {0};
     private double angle;
     private float currentMultiplier;
     private boolean isBlacklistDimension = false;
+    private EnergyInventorySlot energySlot;
 
     public TileEntityWindGenerator() {
         super("wind", "WindGenerator", MekanismConfig.current().generators.windGeneratorStorage.val(), MekanismConfig.current().generators.windGenerationMax.val() * 2);
-        inventory = NonNullListSynchronized.withSize(SLOTS.length, ItemStack.EMPTY);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        energySlot = builder.addSlot(EnergyInventorySlot.drain(this, listener, 143, 35));
+        return builder.build();
     }
 
     @Override
@@ -46,22 +63,39 @@ public class TileEntityWindGenerator extends TileEntityGenerator implements IBou
     @Override
     public void onAsyncUpdateServer() {
         super.onAsyncUpdateServer();
-        ChargeUtils.charge(0, this);
+        energySlot.drainContainer();
         // If we're in a blacklisted dimension, there's nothing more to do
         if (isBlacklistDimension) {
             return;
         }
 
-        if (ticker % 20 == 0) {
-            currentMultiplier = getMultiplier();
-            setActive(MekanismUtils.canFunction(this) && currentMultiplier > 0);
-        }
         if (getActive()) {
-            setEnergy(electricityStored.get() + getEnergyAdd());
+            getEnergyContainer().insert(getEnergyAdd(), Action.EXECUTE, AutomationType.INTERNAL);
         }
     }
 
-    public double getEnergyAdd(){
+    @Override
+    public void onUpdateServer() {
+        super.onUpdateServer();
+        if (isBlacklistDimension) {
+            setActive(false);
+        } else if (ticker % 20 == 0) {
+            currentMultiplier = getMultiplier();
+            setActive(MekanismUtils.canFunction(this) && currentMultiplier > 0);
+        }
+    }
+
+    @Override
+    protected boolean supportsAsyncIdleSkipping() {
+        return getClass() == TileEntityWindGenerator.class;
+    }
+
+    @Override
+    protected boolean isAsyncUpdateIdle() {
+        return energySlot.isEmpty() && (isBlacklistDimension || !getActive() || getEnergyContainer().getNeeded() <= 0);
+    }
+
+    public double getEnergyAdd() {
         return MekanismConfig.current().generators.windGenerationMin.val() * currentMultiplier;
     }
 
@@ -104,10 +138,17 @@ public class TileEntityWindGenerator extends TileEntityGenerator implements IBou
             float maxG = (float) MekanismConfig.current().generators.windGenerationMax.val();
             //Prevents the possibility of writing opposite values; https://github.com/Thorfusion/Mekanism-Community-Edition/issues/150
             int rangeY = maxY < minY ? minY - maxY : maxY - minY;
+            if (rangeY <= 0 || minG <= 0 || Float.isNaN(minG) || Float.isInfinite(minG) || Float.isNaN(maxG) || Float.isInfinite(maxG)) {
+                return 0;
+            }
             float rangG = maxG < minG ? minG - maxG : maxG - minG;
             float slope = rangG / rangeY;
             float toGen = minG + (slope * (clampedY - minY));
-            return toGen / minG;
+            float multiplier = toGen / minG;
+            if (Float.isNaN(multiplier) || Float.isInfinite(multiplier)) {
+                return 0;
+            }
+            return multiplier;
         }
         return 0;
     }
@@ -131,27 +172,49 @@ public class TileEntityWindGenerator extends TileEntityGenerator implements IBou
 
     @Override
     public boolean canOperate() {
-        return electricityStored.get() < BASE_MAX_ENERGY && getMultiplier() > 0 && MekanismUtils.canFunction(this);
+        return getEnergyContainer().getNeeded() > 0 && getMultiplier() > 0 && MekanismUtils.canFunction(this);
     }
 
     @Override
-    public void onPlace() {
-        Coord4D current = Coord4D.get(this);
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(EnumFacing.UP, 1), current);
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(EnumFacing.UP, 2), current);
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(EnumFacing.UP, 3), current);
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(EnumFacing.UP, 4), current);
-        // Check to see if the placement is happening in a blacklisted dimension
+    public void collectBoundingBlocks(java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
+        for (int y = 1; y <= 4; y++) {
+            consumer.accept(getPos().up(y), false);
+        }
+    }
+
+    @Nonnull
+    @Override
+    @SideOnly(Side.CLIENT)
+    public AxisAlignedBB getRenderBoundingBox() {
+        return getRenderBoundingBox(getPos());
+    }
+
+    public static AxisAlignedBB getRenderBoundingBox(BlockPos pos) {
+        return new AxisAlignedBB(pos.getX() - RENDER_HORIZONTAL_RADIUS, pos.getY(), pos.getZ() - RENDER_HORIZONTAL_RADIUS,
+                pos.getX() + RENDER_HORIZONTAL_RADIUS + 1D, pos.getY() + RENDER_HEIGHT, pos.getZ() + RENDER_HORIZONTAL_RADIUS + 1D);
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public List<Vec3d> computeOcclusionSamplePoints() {
+        List<Vec3d> samplePoints = new ArrayList<>(super.computeOcclusionSamplePoints());
+        samplePoints.addAll(cullingGetAabbOcclusionSamplePoints(getRenderBoundingBox()));
+        return samplePoints;
+    }
+
+    @Override
+    public void onBoundingBlocksPlaced() {
         isBlacklistDimension = MekanismConfig.current().generators.windGenerationDimBlacklist.val().contains(world.provider.getDimension());
     }
 
     @Override
+    public void onPlace() {
+        tryPlaceBoundingBlocks(world, Coord4D.get(this));
+    }
+
+    @Override
     public void onBreak() {
-        world.setBlockToAir(getPos().add(0, 1, 0));
-        world.setBlockToAir(getPos().add(0, 2, 0));
-        world.setBlockToAir(getPos().add(0, 3, 0));
-        world.setBlockToAir(getPos().add(0, 4, 0));
-        world.setBlockToAir(getPos());
+        removeBoundingBlocks(world, getPos());
     }
 
     @Override
@@ -176,32 +239,37 @@ public class TileEntityWindGenerator extends TileEntityGenerator implements IBou
         return isBlacklistDimension;
     }
 
-
-    @Nonnull
     @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return SLOTS;
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.generators.client.model.ModelWindGenerator.class;
     }
 
     @Override
-    public boolean isItemValidForSlot(int slot, @Nonnull ItemStack stack) {
-        return ChargeUtils.canBeCharged(stack);
+    @SideOnly(Side.CLIENT)
+    public int getSelectionWireframeAnimationCacheKey(IBlockState state, IBlockAccess world, BlockPos pos) {
+        if (!MekanismConfig.current().client.windGeneratorRotating.val()) {
+            return 0;
+        }
+        return Math.floorMod((int) Math.round(getSelectionWireframeAngle() * 2D), 720);
     }
 
     @Override
-    public boolean getEnergySlot() {
-        return inventory.get(0).isEmpty();
+    @SideOnly(Side.CLIENT)
+    public void applySelectionWireframeModelState(Object model, IBlockState state, IBlockAccess world, BlockPos pos) {
+        if (model instanceof mekanism.generators.client.model.ModelWindGenerator windModel) {
+            windModel.applySelectionBladeAngle(getSelectionWireframeAngle());
+        }
     }
 
-    @Override
-    public boolean getInputSlot() {
-        return false;
+    @SideOnly(Side.CLIENT)
+    private double getSelectionWireframeAngle() {
+        double currentAngle = getAngle();
+        if (getActive()) {
+            float partial = Minecraft.getMinecraft().getRenderPartialTicks();
+            currentAngle = (currentAngle + ((getPos().getY() + 4F) / SPEED_SCALED) * partial) % 360D;
+        }
+        return currentAngle < 0D ? currentAngle + 360D : currentAngle;
     }
-
-    @Override
-    public boolean getOuputSlot() {
-        return false;
-    }
-
 
 }

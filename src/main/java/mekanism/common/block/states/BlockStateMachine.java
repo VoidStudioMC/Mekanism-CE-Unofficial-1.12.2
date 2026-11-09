@@ -11,7 +11,10 @@ import mekanism.common.config.MekanismConfig;
 import mekanism.common.tier.BaseTier;
 import mekanism.common.tier.FactoryTier;
 import mekanism.common.tile.*;
-import mekanism.common.tile.factory.*;
+import mekanism.common.tile.factory.TileEntityAdvancedFactory;
+import mekanism.common.tile.factory.TileEntityBasicFactory;
+import mekanism.common.tile.factory.TileEntityEliteFactory;
+import mekanism.common.tile.factory.TileEntityUltimateFactory;
 import mekanism.common.tile.laser.TileEntityLaser;
 import mekanism.common.tile.laser.TileEntityLaserAmplifier;
 import mekanism.common.tile.laser.TileEntityLaserTractorBeam;
@@ -79,7 +82,7 @@ public class BlockStateMachine extends ExtendedBlockState {
         COMBINER(MachineBlock.MACHINE_BLOCK_1, 2, "Combiner", 5, TileEntityCombiner::new, true, false, true, Plane.HORIZONTAL, true, true, true),
         CRUSHER(MachineBlock.MACHINE_BLOCK_1, 3, "Crusher", 6, TileEntityCrusher::new, true, false, true, Plane.HORIZONTAL, true, true, true),
         DIGITAL_MINER(MachineBlock.MACHINE_BLOCK_1, 4, "DigitalMiner", 2, TileEntityDigitalMiner::new, true, true, true, Plane.HORIZONTAL, true, false, false),
-        BASIC_FACTORY(MachineBlock.MACHINE_BLOCK_1, 5, "Factory", 11, TileEntityFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.BASIC, false, false),
+        BASIC_FACTORY(MachineBlock.MACHINE_BLOCK_1, 5, "Factory", 11, TileEntityBasicFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.BASIC, false, false),
         ADVANCED_FACTORY(MachineBlock.MACHINE_BLOCK_1, 6, "Factory", 11, TileEntityAdvancedFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.ADVANCED, false, false),
         ELITE_FACTORY(MachineBlock.MACHINE_BLOCK_1, 7, "Factory", 11, TileEntityEliteFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.ELITE, false, false),
         METALLURGIC_INFUSER(MachineBlock.MACHINE_BLOCK_1, 8, "MetallurgicInfuser", 12, TileEntityMetallurgicInfuser::new, true, true, true, Plane.HORIZONTAL, false, false, false),
@@ -116,7 +119,6 @@ public class BlockStateMachine extends ExtendedBlockState {
         FORMULAIC_ASSEMBLICATOR(MachineBlock.MACHINE_BLOCK_3, 5, "FormulaicAssemblicator", 56, TileEntityFormulaicAssemblicator::new, true, false, true, Plane.HORIZONTAL, true, true, true),
         FUELWOOD_HEATER(MachineBlock.MACHINE_BLOCK_3, 6, "FuelwoodHeater", 58, TileEntityFuelwoodHeater::new, false, false, false, Plane.HORIZONTAL, true, true, true),
         ULTIMATE_FACTORY(MachineBlock.MACHINE_BLOCK_3, 7, "Factory", 11, TileEntityUltimateFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.ULTIMATE, false, false),
-        CREATIVE_FACTORY(MachineBlock.MACHINE_BLOCK_3, 8, "Factory", 11, TileEntityCreativeFactory::new, true, false, true, Plane.HORIZONTAL, true, FactoryTier.CREATIVE, false, false),
         ISOTOPIC_CENTRIFUGE(MachineBlock.MACHINE_BLOCK_3, 9, "IsotopicCentrifuge", 60, TileEntityIsotopicCentrifuge::new, true, true, false, Plane.HORIZONTAL, false, false, false),
         NUTRITIONAL_LIQUIFIER(MachineBlock.MACHINE_BLOCK_3, 10, "NutritionalLiquifier", 61, TileEntityNutritionalLiquifier::new, true, true, true, Plane.HORIZONTAL, false, false, false),
         SUPERCHARGED_COIL(MachineBlock.MACHINE_BLOCK_3, 11, "SuperchargedCoil", -1, TileEntitySuperchargedCoil::new, false, true, false, BlockStateUtils.ALL_FACINGS, false, false, false),
@@ -137,7 +139,8 @@ public class BlockStateMachine extends ExtendedBlockState {
         HYBRID_STORAGE(MachineBlock.MACHINE_BLOCK_4, 10, "Hybrid_Storage", 74, TileEntityHybridStorage::new, true, false, false, BlockStateUtils.ALL_FACINGS, false, true, true),
         MODIFICATION_STATION(MachineBlock.MACHINE_BLOCK_4, 11, "Modification_Station", 75, TileEntityModificationStation::new, true, true, true, Plane.HORIZONTAL, false, false, false),
         RADIOACTIVE_WASTE_BARREL(MachineBlock.MACHINE_BLOCK_4, 12, "radioactive_waste_barrel", -1, TileEntityRadioactiveWasteBarrel::new, false, false, false, Plane.HORIZONTAL, false, false, false),
-        SPS(MachineBlock.MACHINE_BLOCK_4, 13, "sps", 76, TileEntitySPS::new, true, false, false, Plane.HORIZONTAL, true, false, false);
+        SPS(MachineBlock.MACHINE_BLOCK_4, 13, "sps", 76, TileEntitySPS::new, true, false, false, Plane.HORIZONTAL, true, false, false),
+        DIMENSIONAL_STABILIZER(MachineBlock.MACHINE_BLOCK_4, 14, "dimensional_stabilizer", 79, TileEntityDimensionalStabilizer::new, true, false, true, BlockStateUtils.NO_ROTATION, true, true, true);
 
 
         private static final Map<MachineBlock, Int2ReferenceMap<MachineType>> VALID_METAS = new EnumMap<>(MachineBlock.class);
@@ -287,6 +290,7 @@ public class BlockStateMachine extends ExtendedBlockState {
                 case RECYCLER -> MekanismConfig.current().usage.recycler.val();
                 case AMBIENT_ACCUMULATOR_ENERGY -> MekanismConfig.current().usage.AmbientAccumulatorEnergy.val();
                 case MODIFICATION_STATION -> MekanismConfig.current().usage.modificationStation.val();
+                case DIMENSIONAL_STABILIZER -> 5000;
                 default -> 0;
             };
         }
@@ -338,6 +342,7 @@ public class BlockStateMachine extends ExtendedBlockState {
                 case HYBRID_STORAGE -> MekanismConfig.current().storage.HybridStorageEnergy.val();
                 case MODIFICATION_STATION -> MekanismConfig.current().storage.modificationStation.val();
                 case SPS -> 1000000000; //todo
+                case DIMENSIONAL_STABILIZER -> 40000;
                 default -> 400 * getUsage();
             };
         }
@@ -504,4 +509,3 @@ public class BlockStateMachine extends ExtendedBlockState {
         }
     }
 }
-

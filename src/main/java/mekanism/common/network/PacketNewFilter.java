@@ -3,17 +3,15 @@ package mekanism.common.network;
 import io.netty.buffer.ByteBuf;
 import mekanism.api.Coord4D;
 import mekanism.api.TileNetworkList;
-import mekanism.common.Mekanism;
 import mekanism.common.PacketHandler;
+import mekanism.common.content.filter.IFilter;
 import mekanism.common.content.miner.MinerFilter;
 import mekanism.common.content.transporter.TransporterFilter;
 import mekanism.common.network.PacketNewFilter.NewFilterMessage;
-import mekanism.common.network.PacketTileEntity.TileEntityMessage;
-import mekanism.common.tile.TileEntityLogisticalSorter;
-import mekanism.common.tile.machine.TileEntityDigitalMiner;
-import mekanism.common.tile.machine.TileEntityOredictionificator;
+import mekanism.common.tile.interfaces.ITileFilterHolder;
 import mekanism.common.tile.machine.TileEntityOredictionificator.OredictionificatorFilter;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
@@ -24,18 +22,20 @@ public class PacketNewFilter implements IMessageHandler<NewFilterMessage, IMessa
 
     @Override
     public IMessage onMessage(NewFilterMessage message, MessageContext context) {
+        EntityPlayerMP player = context.getServerHandler().player;
+        if (player == null) {
+            return null;
+        }
         WorldServer worldServer = FMLCommonHandler.instance().getMinecraftServerInstance().getWorld(message.coord4D.dimensionId);
+        if (worldServer == null) {
+            return null;
+        }
 
         worldServer.addScheduledTask(() -> {
-            if (message.type == 0 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityLogisticalSorter sorter) {
-                sorter.filters.add(message.tFilter);
-                sorter.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(sorter, sorter.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
-            } else if (message.type == 1 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityDigitalMiner miner) {
-                miner.filters.add(message.mFilter);
-                miner.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(miner, miner.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
-            } else if (message.type == 2 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityOredictionificator oredictionificator) {
-                oredictionificator.filters.add(message.oFilter);
-                oredictionificator.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(oredictionificator, oredictionificator.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
+            TileEntity tile = message.coord4D.getTileEntity(worldServer);
+            IFilter filter = message.getFilter();
+            if (tile instanceof ITileFilterHolder<?> filterHolder && PacketHandler.canAccessTile(player, tile) && filter != null) {
+                filterHolder.getFilterManager().tryAddFilter(filter, true);
             }
         });
         return null;
@@ -69,6 +69,17 @@ public class PacketNewFilter implements IMessageHandler<NewFilterMessage, IMessa
                 oFilter = oredictionificatorFilter;
                 type = 2;
             }
+        }
+
+        public IFilter getFilter() {
+            if (type == 0) {
+                return tFilter;
+            } else if (type == 1) {
+                return mFilter;
+            } else if (type == 2) {
+                return oFilter;
+            }
+            return null;
         }
 
         @Override

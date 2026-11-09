@@ -1,59 +1,85 @@
 package mekanism.common.tile;
 
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.Coord4D;
+import mekanism.api.IContentsListener;
 import mekanism.api.gear.IModule;
 import mekanism.api.gear.ModuleData;
 import mekanism.common.Upgrade;
 import mekanism.common.base.IBoundingBlock;
-import mekanism.common.base.IMachineSlotTip;
 import mekanism.common.block.states.BlockStateMachine;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
+import mekanism.common.capabilities.energy.MachineEnergyContainer;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.content.gear.IModuleContainerItem;
 import mekanism.common.content.gear.IModuleItem;
 import mekanism.common.content.gear.ModuleHelper;
+import mekanism.common.inventory.container.slot.ContainerSlotType;
+import mekanism.common.inventory.container.slot.SlotOverlay;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
+import mekanism.common.inventory.slot.InputInventorySlot;
 import mekanism.common.tile.prefab.TileEntityOperationalMachine;
-import mekanism.common.util.ChargeUtils;
 import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.NonNullListSynchronized;
 import net.minecraft.block.Block;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.math.BlockPos;
+import net.minecraftforge.items.IItemHandler;
+import net.minecraftforge.items.wrapper.InvWrapper;
 import org.jetbrains.annotations.NotNull;
 
-public class TileEntityModificationStation extends TileEntityOperationalMachine implements IBoundingBlock, IMachineSlotTip {
+public class TileEntityModificationStation extends TileEntityOperationalMachine implements IBoundingBlock {
 
+    private EnergyInventorySlot energySlot;
+    private InputInventorySlot moduleSlot;
+    private InputInventorySlot containerSlot;
 
     public TileEntityModificationStation() {
         super("null", MachineType.MODIFICATION_STATION, 0, 40);
-        inventory = NonNullListSynchronized.withSize(4, ItemStack.EMPTY);
-        upgradeComponent.removeSupported(Upgrade.MUFFLING);
-        upgradeComponent.removeSupported(Upgrade.SPEED);
-        upgradeComponent.removeSupported(Upgrade.ENERGY);
+        removeSupportedUpgrade(Upgrade.MUFFLING);
+        removeSupportedUpgrade(Upgrade.SPEED);
+        removeSupportedUpgrade(Upgrade.ENERGY);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        moduleSlot = builder.addSlot(InputInventorySlot.at(stack -> stack.getItem() instanceof IModuleItem, listener, 35, 118));
+        containerSlot = builder.addSlot(InputInventorySlot.at(stack -> stack.getItem() instanceof IModuleContainerItem, listener, 125, 118));
+        moduleSlot.setSlotType(ContainerSlotType.NORMAL);
+        moduleSlot.setSlotOverlay(SlotOverlay.MODULE);
+        containerSlot.setSlotType(ContainerSlotType.NORMAL);
+        energySlot = builder.addSlot(EnergyInventorySlot.fillOrConvert(getMainEnergyContainer(), this::getWorld, listener, 151, 21));
+        return builder.build();
     }
 
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
-        ChargeUtils.discharge(1, this);
-        ItemStack moduleSlot = inventory.get(2);
-        ItemStack containerSlot = inventory.get(3);
+        energySlot.fillContainerOrConvert();
+        ItemStack moduleStack = moduleSlot.getStack();
+        ItemStack containerStack = containerSlot.getStack();
         if (MekanismUtils.canFunction(this)) {
             boolean operated = false;
-            if (getEnergy() >= energyPerTick && !moduleSlot.isEmpty() && !containerSlot.isEmpty()) {
-                ModuleData<?> data = ((IModuleItem) moduleSlot.getItem()).getModuleData();
+            if (getEnergy() >= energyPerTick && !moduleStack.isEmpty() && !containerStack.isEmpty()) {
+                ModuleData<?> data = ((IModuleItem) moduleStack.getItem()).getModuleData();
                 // make sure the container supports this module
-                if (ModuleHelper.get().getSupported(containerSlot).contains(data)) {
+                if (ModuleHelper.get().getSupported(containerStack).contains(data)) {
                     // make sure we can still install more of this module
-                    IModule<?> module = ModuleHelper.get().load(containerSlot, data);
+                    IModule<?> module = ModuleHelper.get().load(containerStack, data);
                     if (module == null || module.getInstalledCount() < data.getMaxStackSize()) {
                         operated = true;
                         operatingTicks++;
-                        electricityStored.addAndGet(-energyPerTick);
+                        getMainEnergyContainer().extract(energyPerTick, Action.EXECUTE, AutomationType.INTERNAL);
                         if (operatingTicks == ticksRequired) {
                             operatingTicks = 0;
-                            ((IModuleContainerItem) containerSlot.getItem()).addModule(containerSlot, data);
-                            moduleSlot.shrink(1);
+                            ((IModuleContainerItem) containerStack.getItem()).addModule(containerStack, data);
+                            containerSlot.onContentsChanged();
+                            moduleSlot.shrinkStack(1, Action.EXECUTE);
                         }
                     }
                 }
@@ -66,14 +92,53 @@ public class TileEntityModificationStation extends TileEntityOperationalMachine 
         prevEnergy = getEnergy();
     }
 
-    public void removeModule(EntityPlayer player, ModuleData<?> type) {
-        ItemStack stack = inventory.get(3);
-        if (!stack.isEmpty()) {
-            IModuleContainerItem container = (IModuleContainerItem) stack.getItem();
-            if (container.hasModule(stack, type) && player.inventory.add(1, type.getStack())) {
-                container.removeModule(stack, type);
+    public void removeModule(EntityPlayer player, ModuleData<?> type, boolean removeAll) {
+        ItemStack stack = containerSlot.getStack();
+        if (stack.isEmpty() || !(stack.getItem() instanceof IModuleContainerItem container)) {
+            return;
+        }
+        IModule<?> module = ModuleHelper.get().load(stack, type);
+        int installed = module == null ? 0 : module.getInstalledCount();
+        if (installed > 0) {
+            int toRemove = removeAll ? installed : 1;
+            ItemStack moduleStack = type.getStack();
+            moduleStack.setCount(toRemove);
+            if (addItemStackToInventory(player, moduleStack)) {
+                for (int i = 0; i < toRemove; i++) {
+                    container.removeModule(stack, type);
+                }
+                containerSlot.setStack(stack);
             }
         }
+    }
+
+    private boolean addItemStackToInventory(EntityPlayer player, ItemStack stack) {
+        IItemHandler inventoryHandler = new InvWrapper(player.inventory);
+        ItemStack remaining = stack.copy();
+        for (int slot = 0; slot < inventoryHandler.getSlots(); slot++) {
+            remaining = inventoryHandler.insertItem(slot, remaining, true);
+            if (remaining.isEmpty()) {
+                ItemStack toInsert = stack;
+                for (int insertSlot = 0; insertSlot < inventoryHandler.getSlots() && !toInsert.isEmpty(); insertSlot++) {
+                    toInsert = inventoryHandler.insertItem(insertSlot, toInsert, false);
+                }
+                player.inventory.markDirty();
+                return toInsert.isEmpty();
+            }
+        }
+        return false;
+    }
+
+    public MachineEnergyContainer getEnergyContainer() {
+        return getMainEnergyContainer();
+    }
+
+    public boolean usedEnergy() {
+        return prevEnergy > getEnergy();
+    }
+
+    public ItemStack getContainerStack() {
+        return containerSlot.getStack();
     }
 
     @Override
@@ -99,20 +164,21 @@ public class TileEntityModificationStation extends TileEntityOperationalMachine 
     }
 
     @Override
-    public void onPlace() {
+    public void collectBoundingBlocks(java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
         EnumFacing right = MekanismUtils.getRight(facing);
-        MekanismUtils.makeBoundingBlock(world, getPos().up(), Coord4D.get(this));
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(right), Coord4D.get(this));
-        MekanismUtils.makeBoundingBlock(world, getPos().offset(right).up(), Coord4D.get(this));
+        consumer.accept(getPos().up(), false);
+        consumer.accept(getPos().offset(right), false);
+        consumer.accept(getPos().offset(right).up(), false);
+    }
+
+    @Override
+    public void onPlace() {
+        tryPlaceBoundingBlocks(world, Coord4D.get(this));
     }
 
     @Override
     public void onBreak() {
-        EnumFacing right = MekanismUtils.getRight(facing);
-        world.setBlockToAir(getPos().offset(right).up());
-        world.setBlockToAir(getPos().offset(right));
-        world.setBlockToAir(getPos().up());
-        world.setBlockToAir(getPos());
+        removeBoundingBlocks(world, getPos());
     }
 
     @Override
@@ -123,22 +189,6 @@ public class TileEntityModificationStation extends TileEntityOperationalMachine 
     public boolean supportsAsync() {
         return false;
     }
-
-    @Override
-    public boolean getEnergySlot() {
-        return inventory.get(1).isEmpty();
-    }
-
-    @Override
-    public boolean getInputSlot() {
-        return false;
-    }
-
-    @Override
-    public boolean getOuputSlot() {
-        return false;
-    }
-
 
     @Override
     public int getBlockGuiID(Block block, int metadata) {

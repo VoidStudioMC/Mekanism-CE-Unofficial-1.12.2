@@ -1,20 +1,30 @@
 package mekanism.common.tile.component;
 
 import io.netty.buffer.ByteBuf;
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.EnumColor;
 import mekanism.api.TileNetworkList;
+import mekanism.api.energy.IEnergyContainer;
+import mekanism.api.fluid.IExtendedFluidTank;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.GasTank;
+import mekanism.api.gas.IExtendedGasTank;
+import mekanism.api.inventory.IInventorySlot;
 import mekanism.api.transmitters.TransmissionType;
-import mekanism.common.SideData;
-import mekanism.common.base.ILogisticalTransporter;
 import mekanism.common.base.ISideConfiguration;
-import mekanism.common.base.ITankManager;
 import mekanism.common.base.ITileComponent;
-import mekanism.common.capabilities.Capabilities;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.content.transporter.TransitRequest;
-import mekanism.common.content.transporter.TransitRequest.TransitResponse;
+import mekanism.common.inventory.container.MekanismContainer.ISpecificContainerTracker;
+import mekanism.common.inventory.container.sync.ISyncableData;
+import mekanism.common.inventory.container.sync.SyncableBoolean;
+import mekanism.common.inventory.container.sync.SyncableInt;
+import mekanism.common.inventory.slot.IRecipeInputInventorySlot;
+import mekanism.common.lib.inventory.HandlerTransitRequest;
+import mekanism.common.lib.inventory.TransitRequest;
+import mekanism.common.lib.inventory.TransitRequest.TransitResponse;
+import mekanism.common.tile.component.config.ConfigInfo;
+import mekanism.common.tile.component.config.DataType;
+import mekanism.common.tile.component.config.slot.*;
 import mekanism.common.tile.prefab.TileEntityContainerBlock;
 import mekanism.common.util.*;
 import net.minecraft.item.ItemStack;
@@ -22,11 +32,14 @@ import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
 import net.minecraftforge.fluids.FluidStack;
-import net.minecraftforge.fluids.FluidTank;
+import net.minecraftforge.items.IItemHandler;
 
 import java.util.*;
+import java.util.function.DoubleSupplier;
+import java.util.function.Predicate;
 
-public class TileComponentEjector implements ITileComponent {
+public class TileComponentEjector implements ITileComponent, ISpecificContainerTracker {
+    private static final TransmissionType[] TRANSMISSION_TYPES = TransmissionType.values();
 
 
     private TileEntityContainerBlock tileEntity;
@@ -35,72 +48,78 @@ public class TileComponentEjector implements ITileComponent {
     private EnumColor outputColor;
     private EnumColor[] inputColors = new EnumColor[]{null, null, null, null, null, null};
     private int tickDelay = 0;
-    private Map<TransmissionType, SideData> sideData = new EnumMap<>(TransmissionType.class);
-    private Map<TransmissionType, SideData> sideData2 = new EnumMap<>(TransmissionType.class);
-    private Map<TransmissionType, SideData> sideData3 = new EnumMap<>(TransmissionType.class);
+    private final EjectorSlotIndex[] outputSlotIndices = new EjectorSlotIndex[6];
+    private Map<TransmissionType, TileComponentConfig> configSources = new EnumMap<>(TransmissionType.class);
+    private Map<TransmissionType, ConfigInfo> configInfo = new EnumMap<>(TransmissionType.class);
+    private Predicate<TransmissionType> canEject;
+    private Predicate<IExtendedGasTank> canTankEject;
+    private DoubleSupplier energyEjectRate;
 
     private final EjectSpeedController fluid = new EjectSpeedController();
-    private final EjectSpeedController fluid2 = new EjectSpeedController();
     private final EjectSpeedController gas = new EjectSpeedController();
-    private final EjectSpeedController gas2 = new EjectSpeedController();
 
     public TileComponentEjector(TileEntityContainerBlock tile) {
+        this(tile, null);
+    }
+
+    public TileComponentEjector(TileEntityContainerBlock tile, DoubleSupplier energyEjectRate, boolean energyMarker) {
+        this(tile, energyEjectRate);
+    }
+
+    private TileComponentEjector(TileEntityContainerBlock tile, DoubleSupplier energyEjectRate) {
         tileEntity = tile;
-        tile.components.add(this);
+        this.energyEjectRate = energyEjectRate;
+        tile.addComponent(this);
     }
 
-    public TileComponentEjector setOutputData(TransmissionType type, SideData data) {
-        sideData.put(type, data);
+    public TileComponentEjector setOutputData(TileComponentConfig config, TransmissionType... types) {
+        for (TransmissionType type : types) {
+            ConfigInfo info = config.getConfigInfo(type);
+            if (info != null) {
+                configInfo.put(type, info);
+                configSources.put(type, config);
+            }
+        }
         return this;
     }
 
-    public TileComponentEjector setInputOutputData(TransmissionType type, SideData data) {
-        sideData2.put(type, data);
+    public TileComponentEjector setCanEject(Predicate<TransmissionType> canEject) {
+        this.canEject = canEject;
         return this;
     }
 
-
-    public TileComponentEjector setInputExtraOutputData(TransmissionType type, SideData data) {
-        sideData3.put(type, data);
+    public TileComponentEjector setCanTankEject(Predicate<IExtendedGasTank> canTankEject) {
+        this.canTankEject = canTankEject;
         return this;
     }
 
     public TileComponentEjector removeOutputData(TransmissionType type) {
-        sideData.remove(type);
-        return this;
-    }
-
-    public TileComponentEjector removeInputOutputData(TransmissionType type) {
-        sideData2.remove(type);
-        return this;
-    }
-
-
-    public TileComponentEjector removeInputExtraOutputData(TransmissionType type) {
-        sideData3.remove(type);
+        configInfo.remove(type);
+        configSources.remove(type);
         return this;
     }
 
     public void readFrom(TileComponentEjector ejector) {
+        Arrays.fill(outputSlotIndices, null);
         strictInput = ejector.strictInput;
         outputColor = ejector.outputColor;
         inputColors = ejector.inputColors;
         tickDelay = ejector.tickDelay;
-        sideData = ejector.sideData;
-        sideData2 = ejector.sideData2;
-        sideData3 = ejector.sideData3;
+        configSources = ejector.configSources;
+        configInfo = ejector.configInfo;
+        canEject = ejector.canEject;
+        canTankEject = ejector.canTankEject;
+        energyEjectRate = ejector.energyEjectRate;
     }
 
-    @Override
-    public void tick() {
-        if (tileEntity.getWorld().isRemote) {
-            return;
-        }
+    public boolean isEjecting(ConfigInfo info, TransmissionType type) {
+        return info != null && info.isEjecting() && (canEject == null || canEject.test(type));
+    }
 
+    public void tickServer() {
         if (tickDelay == 0 || MekanismConfig.current().mekce.ItemsEjectWithoutDelay.val()) {
-            outputItems();
-            outputItems2(sideData2.get(TransmissionType.ITEM));
-            outputItems2(sideData3.get(TransmissionType.ITEM));
+            inputItemsByConfig();
+            outputItemsByConfig();
             if (!MekanismConfig.current().mekce.ItemsEjectWithoutDelay.val()) {
                 tickDelay = MekanismConfig.current().mekce.ItemEjectionDelay.val();
             }
@@ -108,66 +127,10 @@ public class TileComponentEjector implements ITileComponent {
             tickDelay--;
         }
 
-        eject(TransmissionType.GAS);
-        eject2(TransmissionType.GAS, sideData2.get(TransmissionType.GAS));
-        eject2(TransmissionType.GAS, sideData3.get(TransmissionType.GAS));
-        eject(TransmissionType.FLUID);
-        eject2(TransmissionType.FLUID, sideData2.get(TransmissionType.FLUID));
-        eject2(TransmissionType.FLUID, sideData3.get(TransmissionType.FLUID));
-    }
-
-    /**
-     * Eject something.
-     *
-     * @param type Type
-     */
-    private void eject(TransmissionType type) {
-        SideData data = sideData.get(type);
-        if (data == null || !getEjecting(type)) {
-            return;
-        }
-        ITankManager tankManager = (ITankManager) this.tileEntity;
-        Set<EnumFacing> outputSides = getOutputSides(type, data);
-        if (outputSides.isEmpty()) {
-            return;
-        }
-        if (tankManager.getTanks() == null) {
-            return;
-        }
-
-        if (type == TransmissionType.GAS && tankManager.getTanks()[data.availableSlots[0]] instanceof GasTank gasTank) {
-            this.gas.ensureSize(1, () -> Collections.singletonList(new TankProvider.Gas(gasTank)));
-            ejectGas(outputSides, gasTank, this.gas, 0);
-        } else if (type == TransmissionType.FLUID && tankManager.getTanks()[data.availableSlots[0]] instanceof FluidTank fluidTank) {
-            this.fluid.ensureSize(1, () -> Collections.singletonList(new TankProvider.Fluid(fluidTank)));
-            ejectFluid(outputSides, fluidTank, this.fluid, 0);
-        }
-
-    }
-
-    private void eject2(TransmissionType type, SideData data) {
-
-        if (data == null || !getEjecting(type)) {
-            return;
-        }
-        ITankManager tankManager = (ITankManager) this.tileEntity;
-        Set<EnumFacing> outputSides = getOutputSides(type, data);
-        if (outputSides.isEmpty()) {
-            return;
-        }
-        if (tankManager.getTanks() == null) {
-            return;
-        }
-
-        for (int index = 0; index < data.availableSlots.length; index++) {
-            if (data.allowExtractionSlot[index]) {
-                if (type == TransmissionType.GAS && tankManager.getTanks()[data.availableSlots[index]] instanceof GasTank gasTank) {
-                    this.gas2.ensureSize(1, () -> Collections.singletonList(new TankProvider.Gas(gasTank)));
-                    ejectGas(outputSides, gasTank, this.gas2, 0);
-                } else if (type == TransmissionType.FLUID && tankManager.getTanks()[data.availableSlots[index]] instanceof FluidTank fluidTank) {
-                    this.fluid2.ensureSize(1, () -> Collections.singletonList(new TankProvider.Fluid(fluidTank)));
-                    ejectFluid(outputSides, fluidTank, this.fluid2, 0);
-                }
+        // Modern Mek walks a cached enum array instead of allocating a key snapshot per tick.
+        for (TransmissionType type : TRANSMISSION_TYPES) {
+            if (type != TransmissionType.ITEM && type != TransmissionType.HEAT && configInfo.containsKey(type)) {
+                ejectByConfig(type);
             }
         }
     }
@@ -175,10 +138,14 @@ public class TileComponentEjector implements ITileComponent {
     /**
      * Eject gas.
      */
-    private void ejectGas(Set<EnumFacing> outputSides, GasTank tank, EjectSpeedController speedController, int tankIdx) {
+    private void ejectGas(Set<EnumFacing> outputSides, IExtendedGasTank tank, EjectSpeedController speedController, int tankIdx) {
         speedController.record(tankIdx);
 
-        if (tank.getGas() == null || tank.getStored() <= 0 || tank.getGas().getGas() == null) {
+        if (tileEntity.isContainerExtractionGuarded(tank)) {
+            return;
+        }
+
+        if (tank.getGas() == null || tank.getGasAmount() <= 0 || tank.getGas().getGas() == null) {
             return;
         }
 
@@ -186,21 +153,26 @@ public class TileComponentEjector implements ITileComponent {
             return;
         }
 
-        GasStack toEmit = tank.getGas().copy().withAmount(Math.min(tank.getMaxGas(), tank.getStored()));
-        int emitted = GasUtils.emit(toEmit, tileEntity, outputSides);
+        int emitAmount = Math.min(tank.getCapacity(), tank.getGasAmount());
+        GasStack simulated = tank.extract(emitAmount, Action.SIMULATE, AutomationType.INTERNAL);
+        int emitted = simulated == null ? 0 : GasUtils.emit(simulated, tileEntity, outputSides);
         speedController.eject(tankIdx, emitted);
         if (emitted <= 0) {
             return;
         }
 
-        tank.draw(emitted, true);
+        tank.extract(emitted, Action.EXECUTE, AutomationType.INTERNAL);
     }
 
     /**
      * Eject fluid.
      */
-    private void ejectFluid(Set<EnumFacing> outputSides, FluidTank tank, EjectSpeedController speedController, int tankIdx) {
+    private void ejectFluid(Set<EnumFacing> outputSides, IExtendedFluidTank tank, EjectSpeedController speedController, int tankIdx) {
         speedController.record(tankIdx);
+
+        if (tileEntity.isContainerExtractionGuarded(tank)) {
+            return;
+        }
 
         if (tank.getFluid() == null || tank.getFluidAmount() <= 0) {
             return;
@@ -210,132 +182,297 @@ public class TileComponentEjector implements ITileComponent {
             return;
         }
 
-        FluidStack toEmit = PipeUtils.copy(tank.getFluid(), Math.min(tank.getCapacity(), tank.getFluidAmount()));
-        int emitted = PipeUtils.emit(outputSides, toEmit, tileEntity);
+        int emitAmount = Math.min(tank.getCapacity(), tank.getFluidAmount());
+        FluidStack simulated = tank.extract(emitAmount, Action.SIMULATE, AutomationType.INTERNAL);
+        int emitted = simulated == null ? 0 : FluidUtils.emit(outputSides, simulated, tileEntity);
         speedController.eject(tankIdx, emitted);
         if (emitted <= 0) {
             return;
         }
 
-        tank.drain(emitted, true);
+        tank.extract(emitted, Action.EXECUTE, AutomationType.INTERNAL);
     }
 
-    public Set<EnumFacing> getOutputSides(TransmissionType type, SideData data) {
-        Set<EnumFacing> outputSides = EnumSet.noneOf(EnumFacing.class);
-        TileComponentConfig config = ((ISideConfiguration) tileEntity).getConfig();
-        SideConfig sideConfig = config.getConfig(type);
-        List<SideData> outputs = config.getOutputs(type);
-        EnumFacing[] facings = MekanismUtils.getBaseOrientations(tileEntity.facing);
-        for (int i = 0; i < EnumFacing.VALUES.length; i++) {
-            EnumFacing side = facings[i];
-            if (sideConfig.get(side) == outputs.indexOf(data)) {
-                outputSides.add(EnumFacing.VALUES[i]);
+    private boolean outputItemsByConfig() {
+        ConfigInfo info = getConfigInfo(TransmissionType.ITEM);
+        if (info == null || !canEject(TransmissionType.ITEM)) {
+            return false;
+        }
+        Map<List<IInventorySlot>, Set<EnumFacing>> outputData = null;
+        for (DataType dataType : info.getSupportedDataTypes()) {
+            if (!dataType.canOutput()) {
+                continue;
             }
+            ISlotInfo slotInfo = info.getSlotInfo(dataType);
+            if (slotInfo != null && slotInfo.isEmpty()) {
+                continue;
+            }
+            if (!(slotInfo instanceof InventorySlotInfo inventorySlotInfo)) {
+                continue;
+            }
+            Set<EnumFacing> outputs = info.getSidesForData(dataType);
+            if (outputs.isEmpty()) {
+                continue;
+            }
+            List<IInventorySlot> outputSlots = inventorySlotInfo.getOutputSlots();
+            if (outputSlots.isEmpty() || !hasOutputItems(outputSlots)) {
+                continue;
+            }
+            if (outputData == null) {
+                outputData = new HashMap<>();
+            }
+            outputData.computeIfAbsent(new ArrayList<>(outputSlots), ignored -> EnumSet.noneOf(EnumFacing.class)).addAll(outputs);
         }
-        return outputSides;
+        if (outputData == null || outputData.isEmpty()) {
+            return false;
+        }
+        for (Map.Entry<List<IInventorySlot>, Set<EnumFacing>> entry : outputData.entrySet()) {
+            outputItems(entry.getKey(), entry.getValue());
+        }
+        return true;
     }
 
-    private void outputItems() {
-        SideData data = sideData.get(TransmissionType.ITEM);
-        if (data == null || !getEjecting(TransmissionType.ITEM)) {
-            return;
-        }
-        Set<EnumFacing> outputs = getOutputSides(TransmissionType.ITEM, data);
-        if (outputs.isEmpty()) {
-            return;
-        }
-        TransitRequest ejectMap = null;
+    private void outputItems(List<IInventorySlot> outputSlots, Set<EnumFacing> outputs) {
         TileEntityContainerBlock self = tileEntity;
         for (EnumFacing side : outputs) {
-            if (ejectMap == null) {
-                ejectMap = getEjectItemMap(data);
-                if (ejectMap.isEmpty()) {
+            IItemHandler handler = InventoryUtils.getItemHandler(self, side);
+            if (handler == null) {
+                continue;
+            }
+            List<IInventorySlot> sideSlots = self.getInventorySlots(side);
+            IItemHandler targetHandler = self.getCachedNeighborItemHandler(side);
+            if (targetHandler == null) {
+                continue;
+            }
+            TransitRequest ejectMap = getEjectItemMap(handler, sideSlots, outputSlots, side);
+            while (!ejectMap.isEmpty()) {
+                TransitResponse response = ejectMap.eject(self, targetHandler, 0, ignored -> outputColor);
+                if (response.isEmpty()) {
+                    break;
+                }
+                response.useAll();
+            }
+        }
+    }
+
+    private boolean hasOutputItems(List<IInventorySlot> outputSlots) {
+        for (IInventorySlot slot : outputSlots) {
+            if (!slot.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean ejectByConfig(TransmissionType type) {
+        ConfigInfo info = getConfigInfo(type);
+        if (info == null || !canEject(type)) {
+            return false;
+        }
+        Map<Object, Set<EnumFacing>> outputData = null;
+        for (DataType dataType : info.getSupportedDataTypes()) {
+            if (!dataType.canOutput()) {
+                continue;
+            }
+            ISlotInfo slotInfo = info.getSlotInfo(dataType);
+            if (slotInfo != null && slotInfo.isEmpty()) {
+                continue;
+            }
+            Set<EnumFacing> outputSides = info.getSidesForData(dataType);
+            if (outputSides.isEmpty()) {
+                continue;
+            }
+            if (type == TransmissionType.GAS && slotInfo instanceof GasSlotInfo gasSlotInfo) {
+                for (IExtendedGasTank tank : gasSlotInfo.getOutputTanks()) {
+                    if (tank.getGas() != null && tank.getGasAmount() > 0 && (canTankEject == null || canTankEject.test(tank))) {
+                        if (outputData == null) {
+                            outputData = new HashMap<>();
+                        }
+                        outputData.computeIfAbsent(tank, ignored -> EnumSet.noneOf(EnumFacing.class)).addAll(outputSides);
+                    }
+                }
+            } else if (type == TransmissionType.FLUID && slotInfo instanceof FluidSlotInfo fluidSlotInfo) {
+                for (IExtendedFluidTank tank : fluidSlotInfo.getOutputTanks()) {
+                    if (tank.getFluid() != null && tank.getFluidAmount() > 0) {
+                        if (outputData == null) {
+                            outputData = new HashMap<>();
+                        }
+                        outputData.computeIfAbsent(tank, ignored -> EnumSet.noneOf(EnumFacing.class)).addAll(outputSides);
+                    }
+                }
+            } else if (type == TransmissionType.ENERGY && slotInfo instanceof EnergySlotInfo energySlotInfo) {
+                for (IEnergyContainer container : energySlotInfo.getContainers()) {
+                    if (container.getEnergy() > 0) {
+                        if (outputData == null) {
+                            outputData = new HashMap<>();
+                        }
+                        outputData.computeIfAbsent(container, ignored -> EnumSet.noneOf(EnumFacing.class)).addAll(outputSides);
+                    }
+                }
+            }
+        }
+        if (outputData == null || outputData.isEmpty()) {
+            return true;
+        }
+        List<Object> tanks = new ArrayList<>(outputData.keySet());
+        if (type == TransmissionType.GAS) {
+            gas.ensureSize(tanks.size(), () -> {
+                List<TankProvider> providers = new ArrayList<>(tanks.size());
+                for (Object tank : tanks) {
+                    providers.add(new TankProvider.Gas((IExtendedGasTank) tank));
+                }
+                return providers;
+            });
+            for (int tankIdx = 0; tankIdx < tanks.size(); tankIdx++) {
+                ejectGas(outputData.get(tanks.get(tankIdx)), (IExtendedGasTank) tanks.get(tankIdx), gas, tankIdx);
+            }
+        } else if (type == TransmissionType.FLUID) {
+            fluid.ensureSize(tanks.size(), () -> {
+                List<TankProvider> providers = new ArrayList<>(tanks.size());
+                for (Object tank : tanks) {
+                    providers.add(new TankProvider.Fluid((IExtendedFluidTank) tank));
+                }
+                return providers;
+            });
+            for (int tankIdx = 0; tankIdx < tanks.size(); tankIdx++) {
+                ejectFluid(outputData.get(tanks.get(tankIdx)), (IExtendedFluidTank) tanks.get(tankIdx), fluid, tankIdx);
+            }
+        } else if (type == TransmissionType.ENERGY) {
+            for (Object container : tanks) {
+                IEnergyContainer energyContainer = (IEnergyContainer) container;
+                CableUtils.emit(outputData.get(container), energyContainer, tileEntity,
+                        energyEjectRate == null ? energyContainer.getMaxEnergy() : energyEjectRate.getAsDouble());
+            }
+        }
+        return true;
+    }
+
+    private void inputItemsByConfig() {
+        // Input configuration is independent of the transmission types registered for output.
+        TileComponentConfig config = tileEntity instanceof ISideConfiguration sideConfiguration ? sideConfiguration.getConfig() : null;
+        ConfigInfo info = config == null ? getConfigInfo(TransmissionType.ITEM) : config.getConfigInfo(TransmissionType.ITEM);
+        if (info == null) {
+            return;
+        }
+        Set<List<IInventorySlot>> handledInputSlots = new HashSet<>();
+        for (DataType dataType : info.getSupportedDataTypes()) {
+            if (!dataType.canAutoPull()) {
+                continue;
+            }
+            ISlotInfo slotInfo = info.getSlotInfo(dataType);
+            if (!(slotInfo instanceof InventorySlotInfo inventorySlotInfo) || !slotInfo.canInput()) {
+                continue;
+            }
+            List<IInventorySlot> inputSlots = inventorySlotInfo.getInputSlots();
+            if (inputSlots.isEmpty()) {
+                continue;
+            }
+            List<IInventorySlot> inputSlotGroup = new ArrayList<>(inputSlots);
+            if (!handledInputSlots.add(inputSlotGroup)) {
+                continue;
+            }
+            Set<EnumFacing> inputSides = info.getSidesForData(dataType);
+            if (inputSides.isEmpty()) {
+                continue;
+            }
+            for (EnumFacing side : inputSides) {
+                TileEntity tile = MekanismUtils.getTileEntity(tileEntity.getWorld(), tileEntity.getPos().offset(side));
+                if (tile == null || !InventoryUtils.isItemHandler(tile, side.getOpposite())) {
+                    continue;
+                }
+                IItemHandler handler = InventoryUtils.getItemHandler(tile, side.getOpposite());
+                if (handler != null && inputFromExternal(handler, inputSlotGroup, side)) {
+                    tileEntity.markNoUpdateSync();
                     break;
                 }
             }
-            TileEntity tile = MekanismUtils.getTileEntity(self.getWorld(), self.getPos().offset(side));
-            if (tile == null) {
-                //If the spot is not loaded just skip trying to eject to it
-                continue;
-            }
-            ILogisticalTransporter capability = CapabilityUtils.getCapability(tile, Capabilities.LOGISTICAL_TRANSPORTER_CAPABILITY, side.getOpposite());
-            TransitResponse response;
-            if (capability == null) {
-                response = InventoryUtils.putStackInInventory(tile, ejectMap, side, false);
-            } else {
-                response = TransporterUtils.insert(self, capability, ejectMap, outputColor, true, 0);
-            }
-            if (!response.isEmpty()) {
-                response.getInvStack(self, side).use();
-                //Set map to null so next loop recalculates the eject map so that all sides get a chance to be ejected to
-                // assuming that there is still any left
-                //TODO: Eventually make some way to just directly update the TransitRequest with remaining parts
-                ejectMap = null;
-            }
         }
     }
 
-    private void outputItems2(SideData data) {
-        if (data == null || !getEjecting(TransmissionType.ITEM)) {
-            return;
-        }
-        Set<EnumFacing> outputs = getOutputSides(TransmissionType.ITEM, data);
-        TransitRequest ejectMap = null;
-        TileEntityContainerBlock self = tileEntity;
-        for (EnumFacing side : outputs) {
-            if (ejectMap == null) {
-                ejectMap = getEjectItemMap2(data);
-                if (ejectMap.isEmpty()) {
-                    break;
-                }
-            }
-            TileEntity tile = MekanismUtils.getTileEntity(self.getWorld(), self.getPos().offset(side));
-            if (tile == null) {
-                //If the spot is not loaded just skip trying to eject to it
+    private boolean inputFromExternal(IItemHandler external, List<IInventorySlot> internalSlots, EnumFacing side) {
+        for (int externalSlot = external.getSlots() - 1; externalSlot >= 0; externalSlot--) {
+            ItemStack externalStack = external.getStackInSlot(externalSlot);
+            if (externalStack.isEmpty()) {
                 continue;
             }
-            ILogisticalTransporter capability = CapabilityUtils.getCapability(tile, Capabilities.LOGISTICAL_TRANSPORTER_CAPABILITY, side.getOpposite());
-            TransitResponse response;
-            if (capability == null) {
-                response = InventoryUtils.putStackInInventory(tile, ejectMap, side, false);
-            } else {
-                response = TransporterUtils.insert(self, capability, ejectMap, outputColor, true, 0);
-            }
-            if (!response.isEmpty()) {
-                response.getInvStack(self, side).use();
-                //Set map to null so next loop recalculates the eject map so that all sides get a chance to be ejected to
-                // assuming that there is still any left
-                //TODO: Eventually make some way to just directly update the TransitRequest with remaining parts
-                ejectMap = null;
+            if (inputFromExternalSlot(external, externalSlot, externalStack, internalSlots, side, true) ||
+                    inputFromExternalSlot(external, externalSlot, externalStack, internalSlots, side, false)) {
+                return true;
             }
         }
+        return false;
     }
 
-    private TransitRequest getEjectItemMap(SideData data) {
-        TransitRequest request = new TransitRequest();
-        for (int index = 0; index < data.availableSlots.length; index++) {
-            int slotID = data.availableSlots[index];
-            ItemStack stack = tileEntity.getStackInSlot(slotID);
-            if (!stack.isEmpty()) {
-                request.addItem(stack, index);
+    private boolean inputFromExternalSlot(IItemHandler external, int externalSlot, ItemStack externalStack, List<IInventorySlot> internalSlots, EnumFacing side,
+                                          boolean ignoreEmpty) {
+        int maxCanExtract = Math.min(externalStack.getCount(), externalStack.getMaxStackSize());
+        for (IInventorySlot internalSlot : internalSlots) {
+            if (ignoreEmpty == internalSlot.isEmpty()) {
+                continue;
             }
+            ItemStack simulatedRemainder = internalSlot.insertItem(externalStack, Action.SIMULATE, AutomationType.EXTERNAL);
+            int toMove = externalStack.getCount() - simulatedRemainder.getCount();
+            if (toMove <= 0) {
+                continue;
+            }
+            ItemStack extracted = external.extractItem(externalSlot, Math.min(maxCanExtract, toMove), true);
+            if (extracted.isEmpty()) {
+                continue;
+            }
+            if (internalSlot instanceof IRecipeInputInventorySlot recipeInputSlot && !recipeInputSlot.canAutoPull(extracted, side)) {
+                continue;
+            }
+            ItemStack remainder = internalSlot.insertItem(extracted, Action.EXECUTE, AutomationType.EXTERNAL);
+            int moved = extracted.getCount() - remainder.getCount();
+            if (moved > 0) {
+                external.extractItem(externalSlot, moved, false);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private TransitRequest getEjectItemMap(IItemHandler handler, List<IInventorySlot> sideSlots, List<IInventorySlot> outputSlots, EnumFacing side) {
+        EjectorSlotIndex indices = outputSlotIndices[side.ordinal()];
+        if (indices == null || !indices.matches(sideSlots)) {
+            outputSlotIndices[side.ordinal()] = indices = new EjectorSlotIndex(sideSlots);
+        }
+        HandlerTransitRequest request = new HandlerTransitRequest(handler);
+        List<IInventorySlot> shuffled = new ArrayList<>(outputSlots);
+        Collections.shuffle(shuffled);
+        for (IInventorySlot slot : shuffled) {
+            int slotIndex = indices.indexOf(sideSlots, slot);
+            if (slotIndex != -1) {
+                addToEjectItemMap(request, slot, slotIndex);
+            }
+        }
+        // Simulation/protection callbacks can rebuild or reorder the holder. No items have
+        // been extracted yet: discard this proposal and retry next tick with the new layout.
+        if (!indices.matches(tileEntity.getInventorySlots(side))) {
+            outputSlotIndices[side.ordinal()] = null;
+            return new HandlerTransitRequest(handler);
         }
         return request;
     }
 
-    private TransitRequest getEjectItemMap2(SideData data) {
-        TransitRequest request = new TransitRequest();
-        for (int index = 0; index < data.availableSlots.length; index++) {
-            int slotID = data.availableSlots[index];
-            if (data.allowExtractionSlot[index]) {
-                ItemStack stack = tileEntity.getStackInSlot(slotID);
-                if (!stack.isEmpty()) {
-                    request.addItem(stack, index);
-                }
-            }
-
+    private void addToEjectItemMap(HandlerTransitRequest request, IInventorySlot slot, int index) {
+        if (slot.isEmpty()) return;
+        if (tileEntity.isContainerExtractionGuarded(slot)) {
+            return;
         }
-        return request;
+        ItemStack simulated = slot.extractItem(slot.getCount(), mekanism.api.Action.SIMULATE, mekanism.api.AutomationType.EXTERNAL);
+        if (!simulated.isEmpty()) {
+            request.addItem(simulated, index);
+        }
+    }
+
+    private ConfigInfo getConfigInfo(TransmissionType type) {
+        TileComponentConfig config = configSources.get(type);
+        return config == null ? configInfo.get(type) : config.getConfigInfo(type);
+    }
+
+    private boolean canEject(TransmissionType type) {
+        return getEjecting(type) && (canEject == null || canEject.test(type));
     }
 
     public boolean hasStrictInput() {
@@ -411,7 +548,7 @@ public class TileComponentEjector implements ITileComponent {
         if (inputColor == -1) {
             return null;
         }
-        return TransporterUtils.colors.get(inputColor);
+        return MekanismUtils.getByIndex(TransporterUtils.colors, inputColor, null);
     }
 
     private int getColorIndex(EnumColor color) {
@@ -423,6 +560,19 @@ public class TileComponentEjector implements ITileComponent {
 
     @Override
     public void invalidate() {
+        Arrays.fill(outputSlotIndices, null);
+    }
+
+    @Override
+    public List<ISyncableData> getSpecificSyncableData() {
+        List<ISyncableData> list = new ArrayList<>();
+        list.add(SyncableBoolean.create(this::hasStrictInput, value -> strictInput = value));
+        list.add(SyncableInt.create(() -> getColorIndex(outputColor), index -> outputColor = readColor(index)));
+        for (int i = 0; i < inputColors.length; i++) {
+            int idx = i;
+            list.add(SyncableInt.create(() -> getColorIndex(inputColors[idx]), index -> inputColors[idx] = readColor(index)));
+        }
+        return list;
     }
 
     private boolean getEjecting(TransmissionType type) {
@@ -432,4 +582,5 @@ public class TileComponentEjector implements ITileComponent {
             return false;
         }
     }
+
 }

@@ -3,10 +3,13 @@ package mekanism.common.network;
 import io.netty.buffer.ByteBuf;
 import mekanism.api.Coord4D;
 import mekanism.common.PacketHandler;
+import mekanism.common.entity.EntityRobit;
+import mekanism.common.inventory.container.item.MekanismItemContainer;
 import mekanism.common.network.PacketSecurityMode.SecurityModeMessage;
 import mekanism.common.security.ISecurityItem;
 import mekanism.common.security.ISecurityTile;
 import mekanism.common.security.ISecurityTile.SecurityMode;
+import mekanism.common.util.MekanismUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
@@ -22,9 +25,15 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
     @Override
     public IMessage onMessage(SecurityModeMessage message, MessageContext context) {
         EntityPlayer player = PacketHandler.getPlayer(context);
+        if (player == null) {
+            return null;
+        }
         PacketHandler.handlePacket(() -> {
             if (message.packetType == SecurityPacketType.BLOCK) {
                 TileEntity tileEntity = message.coord4D.getTileEntity(player.world);
+                if (!PacketHandler.canAccessTile(player, tileEntity)) {
+                    return;
+                }
                 if (tileEntity instanceof ISecurityTile securityTile) {
                     UUID owner = securityTile.getSecurity().getOwnerUUID();
                     if (owner != null && player.getUniqueID().equals(owner)) {
@@ -32,10 +41,24 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
                         tileEntity.markDirty();
                     }
                 }
-            } else {
-                ItemStack stack = player.getHeldItem(message.currentHand);
-                if (stack.getItem() instanceof ISecurityItem item) {
+            } else if (message.packetType == SecurityPacketType.ITEM) {
+                if (message.windowId < 0 || !(player.openContainer instanceof MekanismItemContainer)) {
+                    return;
+                }
+                MekanismItemContainer container = (MekanismItemContainer) player.openContainer;
+                if (container.windowId != message.windowId || container.getHand() != message.currentHand || !container.canInteractWith(player)) {
+                    return;
+                }
+                ItemStack stack = container.getStack();
+                if (!stack.isEmpty() && stack.getItem() instanceof ISecurityItem item &&
+                        player.getUniqueID().equals(item.getOwnerUUID(stack))) {
                     item.setSecurity(stack, message.value);
+                }
+            } else if (message.packetType == SecurityPacketType.ENTITY) {
+                if (player.world.getEntityByID(message.entityId) instanceof EntityRobit robit && player.getDistanceSq(robit) <= 64) {
+                    if (player.getUniqueID().equals(robit.getOwnerUUID())) {
+                        robit.setSecurityMode(message.value);
+                    }
                 }
             }
         }, player);
@@ -44,7 +67,8 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
 
     public enum SecurityPacketType {
         BLOCK,
-        ITEM
+        ITEM,
+        ENTITY
     }
 
     public static class SecurityModeMessage implements IMessage {
@@ -52,7 +76,9 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
         public SecurityPacketType packetType;
         public Coord4D coord4D;
         public EnumHand currentHand;
+        public int entityId;
         public SecurityMode value;
+        public int windowId = -1;
 
         public SecurityModeMessage() {
         }
@@ -64,8 +90,19 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
         }
 
         public SecurityModeMessage(EnumHand hand, SecurityMode control) {
+            this(-1, hand, control);
+        }
+
+        public SecurityModeMessage(int windowId, EnumHand hand, SecurityMode control) {
             packetType = SecurityPacketType.ITEM;
+            this.windowId = windowId;
             currentHand = hand;
+            value = control;
+        }
+
+        public SecurityModeMessage(EntityRobit robit, SecurityMode control) {
+            packetType = SecurityPacketType.ENTITY;
+            entityId = robit.getEntityId();
             value = control;
         }
 
@@ -74,21 +111,27 @@ public class PacketSecurityMode implements IMessageHandler<SecurityModeMessage, 
             dataStream.writeInt(packetType.ordinal());
             if (packetType == SecurityPacketType.BLOCK) {
                 coord4D.write(dataStream);
-            } else {
+            } else if (packetType == SecurityPacketType.ITEM) {
+                dataStream.writeInt(windowId);
                 dataStream.writeInt(currentHand.ordinal());
+            } else if (packetType == SecurityPacketType.ENTITY) {
+                dataStream.writeInt(entityId);
             }
             dataStream.writeInt(value.ordinal());
         }
 
         @Override
         public void fromBytes(ByteBuf dataStream) {
-            packetType = SecurityPacketType.values()[dataStream.readInt()];
+            packetType = MekanismUtils.getByIndex(SecurityPacketType.values(), dataStream.readInt(), SecurityPacketType.BLOCK);
             if (packetType == SecurityPacketType.BLOCK) {
                 coord4D = Coord4D.read(dataStream);
-            } else {
-                currentHand = EnumHand.values()[dataStream.readInt()];
+            } else if (packetType == SecurityPacketType.ITEM) {
+                windowId = dataStream.readInt();
+                currentHand = MekanismUtils.getByIndex(EnumHand.values(), dataStream.readInt(), EnumHand.MAIN_HAND);
+            } else if (packetType == SecurityPacketType.ENTITY) {
+                entityId = dataStream.readInt();
             }
-            value = SecurityMode.values()[dataStream.readInt()];
+            value = MekanismUtils.getByIndex(SecurityMode.values(), dataStream.readInt(), SecurityMode.PUBLIC);
         }
     }
 }

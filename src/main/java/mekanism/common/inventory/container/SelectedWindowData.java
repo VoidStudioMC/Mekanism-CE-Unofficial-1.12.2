@@ -1,16 +1,17 @@
-/*
 package mekanism.common.inventory.container;
 
-import com.mojang.realmsclient.util.Pair;
+import mekanism.common.Mekanism;
+import mekanism.common.config.BaseConfig;
+import mekanism.common.config.ClientConfig;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.config.options.BooleanOption;
 import mekanism.common.config.options.IntOption;
+import net.minecraft.util.ResourceLocation;
+import net.minecraftforge.common.config.Configuration;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 
 public class SelectedWindowData {
 
@@ -24,10 +25,6 @@ public class SelectedWindowData {
         this(type, (byte) 0);
     }
 
-    /**
-     * It is expected to only call this with a piece of extra data that is valid. If it is not valid this end up treating it as zero instead.
-     */
-/*
     public SelectedWindowData(@Nonnull WindowType type, byte extraData) {
         this.type = Objects.requireNonNull(type);
         this.extraData = this.type.isValid(extraData) ? extraData : 0;
@@ -41,7 +38,7 @@ public class SelectedWindowData {
             return false;
         }
         SelectedWindowData other = (SelectedWindowData) o;
-        return extraData == other.extraData && type == other.type;
+        return extraData == other.extraData && type.equals(other.type);
     }
 
     @Override
@@ -49,69 +46,153 @@ public class SelectedWindowData {
         return Objects.hash(type, extraData);
     }
 
-    /**
-     * @apiNote Only call this on the client.
-     */
-/*
-    public void updateLastPosition(int x, int y) {
+    public void updateLastPosition(int x, int y, boolean pinned) {
         String saveName = type.getSaveName(extraData);
         if (saveName != null) {
-            Pair<IntOption, IntOption> cachedPosition = MekanismConfig.current().client.lastWindowPositions.get(saveName);
-            if (cachedPosition != null) {
-                IntOption cachedX = cachedPosition.first();
-                if (cachedX.val() != x) {
-                    cachedX.set(x);
-                }
-                IntOption cachedY = cachedPosition.second();
-                if (cachedY.val() != y) {
-                    cachedY.set(y);
-                }
+            CachedWindowPosition cachedPosition = getCachedPosition(saveName);
+            if (cachedPosition != null && cachedPosition.update(x, y, type.canPin() && pinned)) {
+                cachedPosition.save(Mekanism.configuration);
             }
         }
     }
 
-    /**
-     * @apiNote Only call this on the client.
-     */
-/*
-    public Pair<Integer, Integer> getLastPosition() {
-        String saveName = type.getSaveName(extraData);
-        if (saveName != null) {
-            Pair<IntOption, IntOption> cachedPosition = MekanismConfig.current().client.lastWindowPositions.get(saveName);
-            if (cachedPosition != null) {
-                return Pair.of(cachedPosition.first().val(), cachedPosition.second().val());
-            }
-        }
-        return Pair.of(Integer.MAX_VALUE, Integer.MAX_VALUE);
+    public boolean wasPinned() {
+        return getLastPosition().pinned;
     }
 
-    public enum WindowType {
-        COLOR("color"),
-        CONFIRMATION("confirmation"),
-     //   CRAFTING("crafting", IQIOCraftingWindowHolder.MAX_CRAFTING_WINDOWS),
-        MEKA_SUIT_HELMET("mekaSuitHelmet"),
-        RENAME("rename"),
-        SKIN_SELECT("skinSelect"),
-        SIDE_CONFIG("sideConfig"),
-        TRANSPORTER_CONFIG("transporterConfig"),
-        UPGRADE("upgrade"),
-        /**
-         * For use by windows that don't actually have any server side specific logic required, or don't persist their position.
-         */
-/*
-        UNSPECIFIED(null);
+    public WindowPosition getLastPosition() {
+        String saveName = type.getSaveName(extraData);
+        if (saveName != null) {
+            CachedWindowPosition cachedPosition = getCachedPosition(saveName);
+            if (cachedPosition != null) {
+                return cachedPosition.asWindowPosition();
+            }
+        }
+        return new WindowPosition(Integer.MAX_VALUE, Integer.MAX_VALUE, false);
+    }
+
+    @Nullable
+    private CachedWindowPosition getCachedPosition(String saveName) {
+        ClientConfig client = MekanismConfig.local().client;
+        client.registerWindowType(type);
+        return client.lastWindowPositions.get(saveName);
+    }
+
+    public static class CachedWindowPosition {
+
+        private final IntOption x;
+        private final IntOption y;
+        @Nullable
+        private final BooleanOption pinned;
+
+        public CachedWindowPosition(BaseConfig owner, String savePath, boolean canPin) {
+            String category = owner.getCategory() + ".window." + savePath;
+            this.x = new IntOption(owner, category, "x", Integer.MAX_VALUE, "The last x position the " + savePath + " window was in when it was closed.");
+            this.y = new IntOption(owner, category, "y", Integer.MAX_VALUE, "The last y position the " + savePath + " window was in when it was closed.");
+            this.pinned = canPin ? new BooleanOption(owner, category, "pinned", false, "Whether the " + savePath + " window was pinned when it was closed.") : null;
+        }
+
+        private boolean update(int x, int y, boolean pinned) {
+            boolean changed = false;
+            if (this.x.val() != x) {
+                this.x.set(x);
+                changed = true;
+            }
+            if (this.y.val() != y) {
+                this.y.set(y);
+                changed = true;
+            }
+            if (this.pinned != null && this.pinned.val() != pinned) {
+                this.pinned.set(pinned);
+                changed = true;
+            }
+            return changed;
+        }
+
+        private WindowPosition asWindowPosition() {
+            return new WindowPosition(x.val(), y.val(), pinned != null && pinned.val());
+        }
+
+        private void save(Configuration config) {
+            config.get(x.category(), x.key(), Integer.MAX_VALUE, x.comment()).set(x.val());
+            config.get(y.category(), y.key(), Integer.MAX_VALUE, y.comment()).set(y.val());
+            if (pinned != null) {
+                config.get(pinned.category(), pinned.key(), false, pinned.comment()).set(pinned.val());
+            }
+            config.save();
+        }
+    }
+
+    public static class WindowPosition {
+
+        public final int x;
+        public final int y;
+        public final boolean pinned;
+
+        public WindowPosition(int x, int y, boolean pinned) {
+            this.x = x;
+            this.y = y;
+            this.pinned = pinned;
+        }
+    }
+
+    public static final class WindowType {
+
+        private static final Map<ResourceLocation, WindowType> REGISTRY = new LinkedHashMap<>();
+
+        public static final WindowType COLOR = register("color", "color", false);
+        public static final WindowType CRAFTING = register(new ResourceLocation("mekanism", "crafting"), "crafting", true, (byte) 3);
+        public static final WindowType CONFIRMATION = register("confirmation", "confirmation", false);
+        public static final WindowType MEKA_SUIT_HELMET = register("mekasuit_helmet", "mekasuit_helmet", false);
+        public static final WindowType QIO_FREQUENCY = register("qio_frequency", "qio_frequency", true);
+        public static final WindowType RENAME = register("rename", "rename", false);
+        public static final WindowType SKIN_SELECT = register("skin_select", "skin_select", false);
+        public static final WindowType SIDE_CONFIG = register("side_config", "side_config", true);
+        public static final WindowType TRANSPORTER_CONFIG = register("transporter_config", "transporter_config", true);
+        public static final WindowType UPGRADE = register("upgrade", "upgrade", true);
+        public static final WindowType UNSPECIFIED = register("unspecified", null, false);
 
         @Nullable
         private final String saveName;
+        private final boolean canPin;
         private final byte maxData;
+        private final ResourceLocation registryName;
 
-        WindowType(@Nullable String saveName) {
-            this(saveName, (byte) 1);
+        public static WindowType register(String name, @Nullable String saveName, boolean canPin) {
+            return register(new ResourceLocation("mekanism", name), saveName, canPin);
         }
 
-        WindowType(@Nullable String saveName, byte maxData) {
+        public static WindowType register(ResourceLocation registryName, @Nullable String saveName, boolean canPin) {
+            return register(registryName, saveName, canPin, (byte) 1);
+        }
+
+        public static WindowType register(ResourceLocation registryName, @Nullable String saveName, boolean canPin, byte maxData) {
+            if (REGISTRY.containsKey(registryName)) {
+                throw new IllegalArgumentException("Duplicate window type registration: " + registryName);
+            }
+            WindowType type = new WindowType(registryName, saveName, canPin, maxData);
+            REGISTRY.put(registryName, type);
+            return type;
+        }
+
+        @Nullable
+        public static WindowType byName(String name) {
+            return REGISTRY.get(new ResourceLocation(name));
+        }
+
+        public static List<WindowType> getRegisteredWindowTypes() {
+            return Collections.unmodifiableList(new ArrayList<>(REGISTRY.values()));
+        }
+
+        private WindowType(ResourceLocation registryName, @Nullable String saveName, boolean canPin, byte maxData) {
+            this.registryName = registryName;
             this.saveName = saveName;
+            this.canPin = canPin;
             this.maxData = maxData;
+        }
+
+        public String getRegistryNameString() {
+            return registryName.toString();
         }
 
         @Nullable
@@ -135,7 +216,19 @@ public class SelectedWindowData {
         public boolean isValid(byte extraData) {
             return extraData >= 0 && extraData < maxData;
         }
-    }
 
+        public boolean canPin() {
+            return canPin;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            return obj instanceof WindowType other && registryName.equals(other.registryName);
+        }
+
+        @Override
+        public int hashCode() {
+            return registryName.hashCode();
+        }
+    }
 }
- */

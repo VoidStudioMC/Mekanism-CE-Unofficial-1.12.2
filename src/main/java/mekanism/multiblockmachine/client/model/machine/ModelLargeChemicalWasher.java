@@ -19,6 +19,7 @@ public class ModelLargeChemicalWasher extends ModelBase {
 
     public static ResourceLocation OVERLAY_ON = MekanismUtils.getResource(MekanismMultiblockMachine.MODID, ResourceType.RENDER_MACHINE, "ChemicalWasher/ChemicalWasher_ON.png");
     public static ResourceLocation OVERLAY_OFF = MekanismUtils.getResource(MekanismMultiblockMachine.MODID, ResourceType.RENDER_MACHINE, "ChemicalWasher/ChemicalWasher_OFF.png");
+    private static final ResourceLocation[] LED_ON = createIndexedTextures("ChemicalWasher/LED/LED_", 5);
 
     ModelRenderer tube;
     ModelRenderer up_2;
@@ -126,7 +127,7 @@ public class ModelLargeChemicalWasher extends ModelBase {
         bb_main.cubeList.add(new ModelBox(bb_main, 84, 170, 11.0F, -45.0F, 13.0F, 3, 2, 3, 0.0F, false));
     }
 
-    public void render(double tick, float size, boolean on, TextureManager manager,boolean isEnableGlow) {
+    public void render(double tick, float size, boolean on, TextureManager manager, boolean isEnableGlow) {
 
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
@@ -134,6 +135,7 @@ public class ModelLargeChemicalWasher extends ModelBase {
         GlStateManager.popMatrix();
 
         if (isEnableGlow) {
+            int animationFrame = getTick(tick);
             GlStateManager.pushMatrix();
             GlStateManager.shadeModel(GL11.GL_SMOOTH);
             GlStateManager.disableAlpha();
@@ -145,17 +147,19 @@ public class ModelLargeChemicalWasher extends ModelBase {
             MekanismRenderer.GlowInfo glowInfo = MekanismRenderer.enableGlow();
             doRender(size);
             if (on) {
-                manager.bindTexture(MekanismUtils.getResource(MekanismMultiblockMachine.MODID, ResourceType.RENDER_MACHINE, "ChemicalWasher/LED/LED_" + getTick(tick) + ".png"));
+                manager.bindTexture(LED_ON[animationFrame]);
                 doRender(size);
             }
             MekanismRenderer.disableGlow(glowInfo);
             GlStateManager.disableBlend();
             GlStateManager.enableAlpha();
+            GlStateManager.shadeModel(GL11.GL_FLAT);
             GlStateManager.popMatrix();
         }
     }
 
     public void renderBloom(double tick, float size, boolean on, TextureManager manager) {
+        int animationFrame = getTick(tick);
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
         GlStateManager.disableAlpha();
@@ -167,12 +171,13 @@ public class ModelLargeChemicalWasher extends ModelBase {
         MekanismRenderer.GlowInfo glowInfo = MekanismRenderer.enableGlow();
         doRender(size);
         if (on) {
-            manager.bindTexture(MekanismUtils.getResource(MekanismMultiblockMachine.MODID, ResourceType.RENDER_MACHINE, "ChemicalWasher/LED/LED_" + getTick(tick) + ".png"));
+            manager.bindTexture(LED_ON[animationFrame]);
             doRender(size);
         }
         MekanismRenderer.disableGlow(glowInfo);
         GlStateManager.disableBlend();
         GlStateManager.enableAlpha();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
         GlStateManager.popMatrix();
     }
 
@@ -201,5 +206,13 @@ public class ModelLargeChemicalWasher extends ModelBase {
             return 4;
         }
         return 0;
+    }
+
+    private static ResourceLocation[] createIndexedTextures(String prefix, int count) {
+        ResourceLocation[] textures = new ResourceLocation[count];
+        for (int i = 0; i < count; i++) {
+            textures[i] = MekanismUtils.getResource(MekanismMultiblockMachine.MODID, ResourceType.RENDER_MACHINE, prefix + i + ".png");
+        }
+        return textures;
     }
 }

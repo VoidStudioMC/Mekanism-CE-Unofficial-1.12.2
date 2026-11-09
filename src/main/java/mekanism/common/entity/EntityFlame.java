@@ -63,7 +63,10 @@ public class EntityFlame extends Entity implements IEntityAdditionalSpawnData {
         motionZ = motion.z;
 
         owner = player;
-        mode = ((ItemFlamethrower) player.inventory.getCurrentItem().getItem()).getMode(player.inventory.getCurrentItem());
+        ItemStack currentItem = player.inventory.getCurrentItem();
+        if (!currentItem.isEmpty() && currentItem.getItem() instanceof ItemFlamethrower flamethrower) {
+            mode = flamethrower.getMode(currentItem);
+        }
     }
 
     public void setHeading(Pos3D motion) {
@@ -240,7 +243,7 @@ public class EntityFlame extends Entity implements IEntityAdditionalSpawnData {
 
     @Override
     protected void readEntityFromNBT(@Nonnull NBTTagCompound nbtTags) {
-        mode = ItemFlamethrower.FlamethrowerMode.values()[nbtTags.getInteger("mode")];
+        mode = MekanismUtils.getByIndex(ItemFlamethrower.FlamethrowerMode.values(), nbtTags.getInteger("mode"), mode);
     }
 
     @Override
@@ -255,6 +258,6 @@ public class EntityFlame extends Entity implements IEntityAdditionalSpawnData {
 
     @Override
     public void readSpawnData(ByteBuf dataStream) {
-        mode = ItemFlamethrower.FlamethrowerMode.values()[dataStream.readInt()];
+        mode = MekanismUtils.getByIndex(ItemFlamethrower.FlamethrowerMode.values(), dataStream.readInt(), mode);
     }
 }

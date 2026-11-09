@@ -1,18 +1,29 @@
 package mekanism.common.content.tank;
 
 import mekanism.api.gas.GasStack;
+import mekanism.common.base.IFluidContainerManager.ContainerEditMode;
 import mekanism.common.multiblock.MultiblockCache;
-import mekanism.common.util.FluidContainerUtils.ContainerEditMode;
-import mekanism.common.util.NonNullListSynchronized;
-import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.nbt.NBTTagList;
-import net.minecraftforge.common.util.Constants.NBT;
 import net.minecraftforge.fluids.FluidStack;
 
 public class TankCache extends MultiblockCache<SynchronizedTankData> {
 
-    public NonNullListSynchronized<ItemStack> inventory = NonNullListSynchronized.withSize(2, ItemStack.EMPTY);
+    @Override
+    public void validateMerge(MultiblockCache<SynchronizedTankData> incoming) throws java.io.IOException {
+        super.validateMerge(incoming);
+        TankCache other = (TankCache) incoming;
+        requireMerge((fluid == null && other.fluid == null) || (gas == null && other.gas == null), "Dynamic tank cannot merge fluid and gas inventories");
+        validateFluidMerge(fluid, other.fluid);
+        validateGasMerge(gas, other.gas);
+    }
+
+    @Override
+    public void validateCapacity(SynchronizedTankData target) throws java.io.IOException {
+        super.validateCapacity(target);
+        requireMerge(fluid == null || gas == null, "Dynamic tank has conflicting stored media");
+        if (fluid != null) validateAmount(fluid.amount, target.getFluidCapacity(), "fluid");
+        if (gas != null) validateAmount(gas.amount, target.getGasCapacity(), "gas");
+    }
 
     public FluidStack fluid;
 
@@ -20,61 +31,65 @@ public class TankCache extends MultiblockCache<SynchronizedTankData> {
 
     public ContainerEditMode editMode = ContainerEditMode.BOTH;
 
+    private void sanitizeStoredSubstances() {
+        if (fluid != null && fluid.amount <= 0) {
+            fluid = null;
+        }
+        if (gas != null && gas.amount <= 0) {
+            gas = null;
+        }
+        if (fluid != null && gas != null) {
+            if (fluid.amount >= gas.amount) {
+                gas = null;
+            } else {
+                fluid = null;
+            }
+        }
+    }
+
     @Override
     public void apply(SynchronizedTankData data) {
-        data.inventory = inventory;
-        data.fluidStored = fluid;
-        data.gasstored = gas;
+        sanitizeStoredSubstances();
+        applyInventory(data);
+        data.fluidStored = fluid == null ? null : fluid.copy();
+        data.gasstored = gas == null ? null : gas.copy();
         data.editMode = editMode;
     }
 
     @Override
     public void sync(SynchronizedTankData data) {
-        inventory = data.inventory;
-        fluid = data.fluidStored;
-        gas = data.gasstored;
+        syncInventory(data);
+        fluid = syncFluidStack(fluid, data.fluidStored);
+        gas = syncGasStack(gas, data.gasstored);
+        sanitizeStoredSubstances();
         editMode = data.editMode;
     }
 
     @Override
     public void load(NBTTagCompound nbtTags) {
-        editMode = ContainerEditMode.values()[nbtTags.getInteger("editMode")];
-        NBTTagList tagList = nbtTags.getTagList("Items", NBT.TAG_COMPOUND);
-        inventory = NonNullListSynchronized.withSize(2, ItemStack.EMPTY);
-
-        for (int tagCount = 0; tagCount < tagList.tagCount(); tagCount++) {
-            NBTTagCompound tagCompound = tagList.getCompoundTagAt(tagCount);
-            byte slotID = tagCompound.getByte("Slot");
-            if (slotID >= 0 && slotID < 2) {
-                inventory.set(slotID, new ItemStack(tagCompound));
-            }
-        }
+        fluid = null;
+        gas = null;
+        editMode = ContainerEditMode.byIndexStatic(nbtTags.getInteger("editMode"));
+        loadInventory(nbtTags);
         if (nbtTags.hasKey("cachedFluid")) {
             fluid = FluidStack.loadFluidStackFromNBT(nbtTags.getCompoundTag("cachedFluid"));
         }
-        if (nbtTags.hasKey("cachedGas")){
+        if (nbtTags.hasKey("cachedGas")) {
             gas = GasStack.readFromNBT(nbtTags.getCompoundTag("cachedGas"));
         }
+        sanitizeStoredSubstances();
     }
 
     @Override
     public void save(NBTTagCompound nbtTags) {
+        sanitizeStoredSubstances();
         nbtTags.setInteger("editMode", editMode.ordinal());
-        NBTTagList tagList = new NBTTagList();
-        for (int slotCount = 0; slotCount < 2; slotCount++) {
-            if (!inventory.get(slotCount).isEmpty()) {
-                NBTTagCompound tagCompound = new NBTTagCompound();
-                tagCompound.setByte("Slot", (byte) slotCount);
-                inventory.get(slotCount).writeToNBT(tagCompound);
-                tagList.appendTag(tagCompound);
-            }
-        }
-        nbtTags.setTag("Items", tagList);
+        saveInventory(nbtTags);
         if (fluid != null) {
             nbtTags.setTag("cachedFluid", fluid.writeToNBT(new NBTTagCompound()));
         }
-        if (gas !=null){
-            nbtTags.setTag("cachedGas",gas.write(new NBTTagCompound()));
+        if (gas != null) {
+            nbtTags.setTag("cachedGas", gas.write(new NBTTagCompound()));
         }
     }
 }

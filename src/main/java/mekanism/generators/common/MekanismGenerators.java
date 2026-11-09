@@ -19,6 +19,7 @@ import mekanism.common.multiblock.MultiblockManager;
 import mekanism.common.network.PacketSimpleGui;
 import mekanism.common.recipe.RecipeHandler;
 import mekanism.common.util.StackUtils;
+import mekanism.generators.common.content.fission.SynchronizedFissionData;
 import mekanism.generators.common.content.turbine.SynchronizedTurbineData;
 import mekanism.generators.common.fixers.GeneratorTEFixer;
 import net.minecraft.block.Block;
@@ -46,7 +47,7 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.network.NetworkRegistry;
 import net.minecraftforge.oredict.OreDictionary;
 
-@Mod(modid = MekanismGenerators.MODID, useMetadata = true, guiFactory = "mekanism.generators.client.gui.GeneratorsGuiFactory",customProperties = {
+@Mod(modid = MekanismGenerators.MODID, useMetadata = true, guiFactory = "mekanism.generators.client.gui.GeneratorsGuiFactory", customProperties = {
         @Mod.CustomProperty(k = "license", v = "EUPL-1.2"),
         @Mod.CustomProperty(k = "issueTrackerUrl", v = "https://github.com/sddsd2332/Mekanism-CE-Unofficial-1.12.2/issues"),
         @Mod.CustomProperty(k = "iconFile", v = "assets/mekanism/icon.png"),
@@ -66,10 +67,11 @@ public class MekanismGenerators implements IModule {
     /**
      * MekanismGenerators version number
      */
-    public static Version versionNumber = new Version(999, 999, 999);
+    public static Version versionNumber = Version.get(mekanism.mekanism.Tags.VERSION);
     public static final int DATA_VERSION = 1;
     public static CreativeTabMekanismGenerators tabMekanismGenerators = new CreativeTabMekanismGenerators();
     public static MultiblockManager<SynchronizedTurbineData> turbineManager = new MultiblockManager<>("industrialTurbine");
+    public static MultiblockManager<SynchronizedFissionData> fissionManager = new MultiblockManager<>("fissionReactor");
 
     @SubscribeEvent
     public static void registerBlocks(RegistryEvent.Register<Block> event) {
@@ -129,7 +131,7 @@ public class MekanismGenerators implements IModule {
                 if (s.getFluid() != null && !GasRegistry.containsGas(s.getFluid().getFluid().getName())) {
                     Gas gas = new Gas(s.getFluid().getFluid());
                     GasRegistry.register(new Gas(s.getFluid().getFluid()));
-                    RecipeHandler.addGasStackFuelToEnergyRecipe(new GasStack(gas, s.getTotalBurningTime() / Fluid.BUCKET_VOLUME),RFIntegration.fromRF(s.getPowerPerCycle() / (double) MjAPI.MJ * 20) );
+                    RecipeHandler.addGasStackFuelToEnergyRecipe(new GasStack(gas, s.getTotalBurningTime() / Fluid.BUCKET_VOLUME), RFIntegration.fromRF(s.getPowerPerCycle() / (double) MjAPI.MJ * 20));
                 }
             }
 
@@ -141,7 +143,7 @@ public class MekanismGenerators implements IModule {
     @SubscribeEvent
     public static void registerRecipes(RegistryEvent.Register<IRecipe> event) {
         //1mB hydrogen + 2*bioFuel/tick*200ticks/100mB * 20x efficiency bonus
-       // FuelHandler.addGas(MekanismFluids.Ethene, MekanismConfig.current().general.ETHENE_BURN_TIME.val(), MekanismConfig.current().general.FROM_H2.val() + MekanismConfig.current().generators.bioGeneration.val() * 2 * MekanismConfig.current().general.ETHENE_BURN_TIME.val());
+        // FuelHandler.addGas(MekanismFluids.Ethene, MekanismConfig.current().general.ETHENE_BURN_TIME.val(), MekanismConfig.current().general.FROM_H2.val() + MekanismConfig.current().generators.bioGeneration.val() * 2 * MekanismConfig.current().general.ETHENE_BURN_TIME.val());
 
 
         RecipeHandler.addGasStackFuelToEnergyRecipe(new GasStack(MekanismFluids.Ethene, MekanismConfig.current().general.ETHENE_BURN_TIME.val()), MekanismConfig.current().general.FROM_H2.val() + MekanismConfig.current().generators.bioGeneration.val() * 2 * MekanismConfig.current().general.ETHENE_BURN_TIME.val());
@@ -152,7 +154,6 @@ public class MekanismGenerators implements IModule {
 
         RecipeHandler.addFusionCoolingRecipe(FluidRegistry.getFluidStack("water", 1), FluidRegistry.getFluidStack("steam", 1));
         RecipeHandler.addFusionCoolingRecipe(FluidRegistry.getFluidStack("liquidsodium", 1), FluidRegistry.getFluidStack("liquidsuperheatedsodium", 1));
-        RecipeHandler.addFusionCoolingRecipe(FluidRegistry.getFluidStack("fissilefuel", 1), FluidRegistry.getFluidStack("nuclearwaste", 1), 20);
     }
 
     @Override

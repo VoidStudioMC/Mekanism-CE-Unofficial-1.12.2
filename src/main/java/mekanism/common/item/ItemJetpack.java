@@ -5,9 +5,7 @@ import baubles.api.IBauble;
 import baubles.api.render.IRenderBauble;
 import mekanism.api.EnumColor;
 import mekanism.api.NBTConstants;
-import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.IGasItem;
 import mekanism.api.mixninapi.ElytraMixinHelp;
 import mekanism.client.model.ModelArmoredJetpack;
 import mekanism.client.model.ModelJetpack;
@@ -17,10 +15,14 @@ import mekanism.client.render.ModelCustomArmor.ArmorModel;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismFluids;
 import mekanism.common.MekanismItems;
+import mekanism.common.capabilities.ItemCapabilityWrapper;
+import mekanism.common.capabilities.gas.item.RateLimitGasHandler;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.integration.MekanismHooks;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.item.interfaces.IItemHUDProvider;
 import mekanism.common.item.interfaces.IJetpackItem;
+import mekanism.common.item.interfaces.ILegacyGasItem;
 import mekanism.common.item.interfaces.IModeItem;
 import mekanism.common.util.ItemDataUtils;
 import mekanism.common.util.LangUtils;
@@ -43,6 +45,7 @@ import net.minecraft.util.NonNullList;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
 import net.minecraftforge.common.ISpecialArmor;
+import net.minecraftforge.common.capabilities.ICapabilityProvider;
 import net.minecraftforge.common.util.EnumHelper;
 import net.minecraftforge.fml.common.Optional;
 import net.minecraftforge.fml.relauncher.Side;
@@ -56,7 +59,7 @@ import java.util.List;
         @Optional.Interface(iface = "baubles.api.IBauble", modid = MekanismHooks.Baubles_MOD_ID),
         @Optional.Interface(iface = "baubles.api.render.IRenderBauble", modid = MekanismHooks.Baubles_MOD_ID)
 })
-public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, IJetpackItem, IItemHUDProvider, IBauble, IRenderBauble, IModeItem, ElytraMixinHelp {
+public class ItemJetpack extends ItemArmor implements ILegacyGasItem, ISpecialArmor, IJetpackItem, IItemHUDProvider, IBauble, IRenderBauble, IModeItem, ElytraMixinHelp {
 
     public int TRANSFER_RATE = 16;
 
@@ -73,14 +76,14 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
 
     @Override
     public double getDurabilityForDisplay(ItemStack stack) {
-        return 1D - ((getGas(stack) != null ? (double) getGas(stack).amount : 0D) / (double) getMaxGas(stack));
+        GasStack gas = getStoredGas(stack);
+        return 1D - ((gas != null ? (double) gas.amount : 0D) / (double) getGasCapacity(stack));
     }
 
     @Override
     public int getRGBDurabilityForDisplay(@Nonnull ItemStack stack) {
-        GasStack gas = getGas(stack);
+        GasStack gas = getStoredGas(stack);
         if (gas != null) {
-            MekanismRenderer.color(gas);
             return gas.getGas().getTint();
         } else {
             return MathHelper.hsvToRGB(Math.max(0.0F, (float) (1 - getDurabilityForDisplay(stack))) / 3.0F, 1.0F, 1.0F);
@@ -90,7 +93,7 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
     @Override
     @SideOnly(Side.CLIENT)
     public void addInformation(ItemStack itemstack, World world, List<String> list, ITooltipFlag flag) {
-        GasStack gasStack = getGas(itemstack);
+        GasStack gasStack = getStoredGas(itemstack);
         if (gasStack == null) {
             list.add(LangUtils.localize("tooltip.noGas") + ".");
         } else {
@@ -122,52 +125,22 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
     }
 
 
-    @Override
-    public int getMaxGas(ItemStack itemstack) {
+    private int getGasCapacity(ItemStack itemstack) {
         return MekanismConfig.current().general.maxJetpackGas.val();
     }
 
-    @Override
-    public int getRate(ItemStack itemstack) {
+    private int getGasTransferRate(ItemStack itemstack) {
         return TRANSFER_RATE;
     }
 
-    @Override
-    public int addGas(ItemStack itemstack, GasStack stack) {
-        if (getGas(itemstack) != null && getGas(itemstack).getGas() != stack.getGas()) {
-            return 0;
-        }
-        if (stack.getGas() != MekanismFluids.Hydrogen) {
-            return 0;
-        }
-        int toUse = Math.min(getMaxGas(itemstack) - getStored(itemstack), Math.min(getRate(itemstack), stack.amount));
-        setGas(itemstack, new GasStack(stack.getGas(), getStored(itemstack) + toUse));
-        return toUse;
-    }
-
-    @Override
-    public GasStack removeGas(ItemStack itemstack, int amount) {
-        return null;
-    }
-
-
     public int getStored(ItemStack itemstack) {
-        return getGas(itemstack) != null ? getGas(itemstack).amount : 0;
-    }
-
-    @Override
-    public boolean canReceiveGas(ItemStack itemstack, Gas type) {
-        return type == MekanismFluids.Hydrogen;
-    }
-
-    @Override
-    public boolean canProvideGas(ItemStack itemstack, Gas type) {
-        return false;
+        GasStack gas = getStoredGas(itemstack);
+        return gas == null ? 0 : gas.amount;
     }
 
     @Override
     public boolean canUseJetpack(ItemStack stack) {
-        return getGas(stack) != null && getStored(stack) > 0;
+        return hasGas(stack);
     }
 
     @Override
@@ -177,10 +150,7 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
 
     @Override
     public void useJetpackFuel(ItemStack stack) {
-        GasStack gas = getGas(stack);
-        if (gas != null) {
-            setGas(stack, new GasStack(gas.getGas(), gas.amount - 1));
-        }
+        useGas(stack, 1);
     }
 
     @Override
@@ -189,20 +159,36 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
     }
 
 
-    @Override
-    public GasStack getGas(ItemStack itemstack) {
-        return GasStack.readFromNBT(ItemDataUtils.getCompound(itemstack, "stored"));
+    private GasStack getStoredGas(ItemStack itemstack) {
+        return GasInventorySlot.getStoredGas(itemstack, "stored");
+    }
+
+    private boolean hasGas(ItemStack stack) {
+        GasStack stored = getContainedGas(stack);
+        return stored != null && stored.amount > 0;
+    }
+
+    private GasStack getContainedGas(ItemStack stack) {
+        GasStack stored = getStoredGas(stack);
+        return stored != null && stored.getGas() == MekanismFluids.Hydrogen ? stored : null;
+    }
+
+    private GasStack useGas(ItemStack stack, int amount) {
+        return GasInventorySlot.useGas(stack, MekanismFluids.Hydrogen, amount);
+    }
+
+    private void setStoredGas(ItemStack itemstack, GasStack stack) {
+        if (stack != null && stack.getGas() != null && stack.getGas() != MekanismFluids.Hydrogen) {
+            return;
+        }
+        GasInventorySlot.setStoredGas(itemstack, stack, "stored", getGasCapacity(itemstack));
     }
 
     @Override
-    public void setGas(ItemStack itemstack, GasStack stack) {
-        if (stack == null || stack.amount == 0) {
-            ItemDataUtils.removeData(itemstack, "stored");
-        } else {
-            int amount = Math.max(0, Math.min(stack.amount, getMaxGas(itemstack)));
-            GasStack gasStack = new GasStack(stack.getGas(), amount);
-            ItemDataUtils.setCompound(itemstack, "stored", gasStack.write(new NBTTagCompound()));
-        }
+    public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
+        return new ItemCapabilityWrapper(stack, RateLimitGasHandler.create(() -> getGasTransferRate(stack), () -> getGasCapacity(stack),
+                mekanism.api.functions.ConstantPredicates.notExternal(), mekanism.api.functions.ConstantPredicates.alwaysTrueBi(),
+                gasStack -> gasStack != null && gasStack.getGas() == MekanismFluids.Hydrogen, "stored"));
     }
 
 
@@ -215,7 +201,7 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
         list.add(empty);
 
         ItemStack filled = new ItemStack(this);
-        setGas(filled, new GasStack(MekanismFluids.Hydrogen, ((IGasItem) filled.getItem()).getMaxGas(filled)));
+        setStoredGas(filled, new GasStack(MekanismFluids.Hydrogen, getGasCapacity(filled)));
         list.add(filled);
     }
 
@@ -248,9 +234,10 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
     @Override
     public void addHUDStrings(List<String> list, EntityPlayer player, ItemStack stack, EntityEquipmentSlot slotType) {
         if (slotType == getEquipmentSlot()) {
+            int stored = getStored(stack);
             list.add(LangUtils.localize("tooltip.jetpack.mode") + " " + getJetpackMode(stack).getName());
-            if (getStored(stack) > 0) {
-                list.add(LangUtils.localize("tooltip.jetpack.stored") + " " + EnumColor.ORANGE + getStored(stack));
+            if (stored > 0) {
+                list.add(LangUtils.localize("tooltip.jetpack.stored") + " " + EnumColor.ORANGE + stored);
             } else {
                 list.add(LangUtils.localize("tooltip.jetpack.stored") + " " + EnumColor.ORANGE + LangUtils.localize("tooltip.noGas"));
             }
@@ -269,7 +256,7 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
         JetpackMode newMode = mode.adjust(shift);
         if (mode != newMode) {
             setMode(stack, newMode);
-            displayChange.sendMessage(player,()->new TextComponentGroup().translation("jetpack.mekanism.mode_change").string(newMode.getName()));
+            displayChange.sendMessage(player, () -> new TextComponentGroup().translation("jetpack.mekanism.mode_change").string(newMode.getName()));
         }
     }
 
@@ -284,19 +271,24 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
     @Override
     @Optional.Method(modid = MekanismHooks.Baubles_MOD_ID)
     public void onPlayerBaubleRender(ItemStack itemStack, EntityPlayer entityPlayer, RenderType renderType, float v) {
-        ModelJetpack jetpack = new ModelJetpack();
-        ModelArmoredJetpack armoredJetpack = new ModelArmoredJetpack();
         if (renderType == RenderType.BODY) {
             GlStateManager.pushMatrix();
             GlStateManager.translate(0, 0, 0.06F);
             MekanismRenderer.bindTexture(MekanismUtils.getResource(MekanismUtils.ResourceType.RENDER, "Jetpack.png"));
             if (this == MekanismItems.Jetpack) {
-                jetpack.render(0.0625F);
+                BaubleModels.JETPACK.render(0.0625F);
             } else if (this == MekanismItems.ArmoredJetpack) {
-                armoredJetpack.render(0.0625F);
+                BaubleModels.ARMORED_JETPACK.render(0.0625F);
             }
             GlStateManager.popMatrix();
         }
+    }
+
+    @SideOnly(Side.CLIENT)
+    private static final class BaubleModels {
+
+        private static final ModelJetpack JETPACK = new ModelJetpack();
+        private static final ModelArmoredJetpack ARMORED_JETPACK = new ModelArmoredJetpack();
     }
 
 
@@ -312,7 +304,8 @@ public class ItemJetpack extends ItemArmor implements IGasItem, ISpecialArmor, I
 
     @Override
     public boolean canElytraFly(ItemStack stack, EntityLivingBase entity) {
-        if (armorType == EntityEquipmentSlot.CHEST && !entity.isSneaking() && getStored(stack) > 0) {
+        GasStack stored = getContainedGas(stack);
+        if (armorType == EntityEquipmentSlot.CHEST && !entity.isSneaking() && stored != null && stored.amount > 0) {
             return getJetpackMode(stack) == JetpackMode.VECTOR;
         }
         return false;

@@ -2,12 +2,20 @@ package mekanism.common.multiblock;
 
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import mekanism.api.Coord4D;
+import mekanism.api.gas.GasStack;
+import mekanism.common.multiblock.persistence.ManagedCacheStore;
+import mekanism.common.multiblock.persistence.MultiblockPersistenceSession;
 import mekanism.common.tile.multiblock.TileEntityMultiblock;
+import mekanism.common.util.FluidContainerUtils;
 import net.minecraft.item.ItemStack;
+import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
+import net.minecraftforge.fluids.FluidStack;
 
+import javax.annotation.Nullable;
+import java.io.IOException;
 import java.util.*;
 
 public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
@@ -68,7 +76,12 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
             int maxY = origY + ymax;
             int minZ = origZ + zmin;
             int maxZ = origZ + zmax;
-            for (int x = xmin; x <= xmax; x++) {
+            int length = xmax - xmin + 1;
+            int height = ymax - ymin + 1;
+            int width = zmax - zmin + 1;
+            isValid = length <= 18 && height <= 18 && width <= 18 &&
+                    isAreaLoaded(new BlockPos(minX, minY, minZ), new BlockPos(maxX, maxY, maxZ));
+            for (int x = xmin; isValid && x <= xmax; x++) {
                 int xPos = origX + x;
                 for (int y = ymin; y <= ymax; y++) {
                     int yPos = origY + y;
@@ -101,9 +114,6 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
 
             if (isValid) {
                 //Check the boolean values before performing other calculations
-                int length = Math.abs(xmax - xmin) + 1;
-                int height = Math.abs(ymax - ymin) + 1;
-                int width = Math.abs(zmax - zmin) + 1;
                 if (length <= 18 && height <= 18 && width <= 18) {
                     T structure = getNewStructure();
                     structure.locations = locations;
@@ -173,7 +183,20 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
      * @return Whether or not the block at the specified location is an air block.
      */
     protected boolean isAir(int x, int y, int z) {
-        return pointer.getWorld().isAirBlock(new BlockPos(x, y, z));
+        BlockPos pos = new BlockPos(x, y, z);
+        return isLoaded(pos) && pointer.getWorld().isAirBlock(pos);
+    }
+
+    protected boolean isLoaded(BlockPos pos) {
+        if (pointer.getWorld().isBlockLoaded(pos, false)) return true;
+        pointer.requestCacheRetry();
+        return false;
+    }
+
+    protected boolean isAreaLoaded(BlockPos min, BlockPos max) {
+        if (pointer.getWorld().isAreaLoaded(min, max, false)) return true;
+        pointer.requestCacheRetry();
+        return false;
     }
 
     protected boolean isValidInnerNode(int x, int y, int z) {
@@ -196,7 +219,8 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
         int x = xShift == 1 ? 1 : 0;
         int y = yShift == 1 ? 1 : 0;
         int z = zShift == 1 ? 1 : 0;
-        while (isViableNode(orig.x + x + xShift, orig.y + y + yShift, orig.z + z + zShift)) {
+        while (Math.abs(x) + Math.abs(y) + Math.abs(z) < 18 &&
+                isViableNode(orig.x + x + xShift, orig.y + y + yShift, orig.z + z + zShift)) {
             x += xShift;
             y += yShift;
             z += zShift;
@@ -217,7 +241,12 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
      * @return Whether or not the block at the specified location is a viable node for a multiblock structure.
      */
     public boolean isViableNode(int x, int y, int z) {
+        if (!isLoaded(new BlockPos(x, y, z))) return false;
         TileEntity tile = new Coord4D(x, y, z, pointer.getWorld().provider.getDimension()).getTileEntity(pointer.getWorld());
+        if (tile != null && tile.isInvalid()) {
+            pointer.requestCacheRetry();
+            return false;
+        }
         if (tile instanceof IStructuralMultiblock block && block.canInterface(pointer)) {
             return true;
         }
@@ -277,6 +306,28 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
 
     protected abstract void mergeCaches(List<ItemStack> rejectedItems, MultiblockCache<T> cache, MultiblockCache<T> merge);
 
+    @Nullable
+    protected GasStack mergeGasStack(@Nullable GasStack current, @Nullable GasStack incoming) {
+        if (current == null) {
+            return incoming == null ? null : incoming.copy();
+        } else if (incoming != null && current.isGasEqual(incoming)) {
+            long amount = (long) Math.max(0, current.amount) + Math.max(0, incoming.amount);
+            return current.copy().withAmount((int) Math.min(Integer.MAX_VALUE, amount));
+        }
+        return current;
+    }
+
+    @Nullable
+    protected FluidStack mergeFluidStack(@Nullable FluidStack current, @Nullable FluidStack incoming) {
+        if (current == null) {
+            return incoming == null ? null : incoming.copy();
+        } else if (incoming != null && current.isFluidEqual(incoming)) {
+            long amount = (long) Math.max(0, current.amount) + Math.max(0, incoming.amount);
+            return FluidContainerUtils.copyWithAmount(current, (int) Math.min(Integer.MAX_VALUE, amount));
+        }
+        return current;
+    }
+
     protected void onFormed() {
         structureFound.internalLocations.forEach(coord -> {
             TileEntity tile = coord.getTileEntity(pointer.getWorld());
@@ -290,7 +341,11 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
     }
 
     protected void onStructureDestroyed(T structure) {
+        getManager().detached(pointer.getWorld(), structure);
         structure.internalLocations.forEach(this::killInnerNode);
+    }
+
+    protected void onCacheIdsInvalidated(Set<String> staleIds) {
     }
 
     private void killInnerNode(Coord4D coord) {
@@ -304,6 +359,13 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
      * Runs the protocol and updates all nodes that make a part of the multiblock.
      */
     public void doUpdate() {
+        //A neighbor update may destroy and immediately rebuild a structure after it already ran this
+        //tick. Capture the live shared state before any cache is pulled or any tile loses its pointer.
+        T previousStructure = pointer.structure;
+        String previousInventoryId = previousStructure == null ? null : previousStructure.inventoryID;
+        Set<Coord4D> previousLocations = previousStructure == null ? Collections.emptySet() :
+                new ObjectOpenHashSet<>(previousStructure.locations);
+        pointer.syncCachedDataFromStructure();
         Deque<Coord4D> pathingQueue = new LinkedList<>();
         pathingQueue.add(Coord4D.get(pointer));
         while (pathingQueue.peek() != null) {
@@ -319,6 +381,15 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
                     iteratedNodes.forEach(newCoord -> {
                         TileEntity tile = newCoord.getTileEntity(pointer.getWorld());
                         if (tile instanceof TileEntityMultiblock<?> multiblock) {
+                            if (multiblock.structure != null) {
+                                T source = (T) multiblock.structure;
+                                if (!source.destroyed) {
+                                    onStructureDestroyed(source);
+                                    source.destroyed = true;
+                                }
+                                multiblock.syncCachedDataFromStructure();
+                                multiblock.structure.setFormed(false);
+                            }
                             multiblock.structure = null;
                         } else if (tile instanceof IStructuralMultiblock block) {
                             block.setController(null);
@@ -329,60 +400,7 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
                 }
             }
 
-            List<String> idsFound = new ArrayList<>();
-            structureFound.locations.forEach(obj -> {
-                TileEntity tileEntity = obj.getTileEntity(pointer.getWorld());
-                if (tileEntity instanceof TileEntityMultiblock<?> block
-                        && block.cachedID != null) {
-                    idsFound.add(block.cachedID);
-                }
-            });
-            MultiblockCache<T> cache = getNewCache();
-            String idToUse = null;
-            if (idsFound.isEmpty()) {
-                idToUse = MultiblockManager.getUniqueInventoryID();
-            } else {
-                List<ItemStack> rejectedItems = new ArrayList<>();
-                for (String id : idsFound) {
-                    if (getManager().inventories.get(id) != null) {
-                        if (cache == null) {
-                            cache = getManager().pullInventory(pointer.getWorld(), id);
-                        } else {
-                            mergeCaches(rejectedItems, cache, getManager().pullInventory(pointer.getWorld(), id));
-                        }
-                        idToUse = id;
-                    }
-                }
-                //TODO someday: drop all items in rejectedItems
-                //TODO seriously this needs to happen soon
-                //TODO perhaps drop from pointer?
-            }
-
-            cache.apply(structureFound);
-            structureFound.inventoryID = idToUse;
-
-            onFormed();
-
-            List<IStructuralMultiblock> structures = new ArrayList<>();
-            Coord4D toUse = null;
-
-            for (Coord4D obj : structureFound.locations) {
-                TileEntity tileEntity = obj.getTileEntity(pointer.getWorld());
-                if (tileEntity instanceof TileEntityMultiblock) {
-                    ((TileEntityMultiblock<T>) tileEntity).structure = structureFound;
-                    if (toUse == null) {
-                        toUse = obj;
-                    }
-                } else if (tileEntity instanceof IStructuralMultiblock block) {
-                    structures.add(block);
-                }
-            }
-
-            //Remove all structural multiblocks from locations, set controllers
-            for (IStructuralMultiblock node : structures) {
-                node.setController(toUse);
-                structureFound.locations.remove(Coord4D.get((TileEntity) node));
-            }
+            formFoundStructure(previousStructure, previousInventoryId, previousLocations);
         } else {
             iteratedNodes.forEach(coord -> {
                 TileEntity tile = coord.getTileEntity(pointer.getWorld());
@@ -390,7 +408,9 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
                     TileEntityMultiblock<T> tileEntity = (TileEntityMultiblock<T>) tile;
                     if (tileEntity.structure != null && !tileEntity.structure.destroyed) {
                         onStructureDestroyed(tileEntity.structure);
+                        tileEntity.syncCachedDataFromStructure();
                         tileEntity.structure.destroyed = true;
+                        tileEntity.structure.setFormed(false);
                     }
                     tileEntity.structure = null;
                 } else if (tile instanceof IStructuralMultiblock block) {
@@ -398,6 +418,265 @@ public abstract class UpdateProtocol<T extends SynchronizedData<T>> {
                 }
             });
             innerNodes.forEach(this::killInnerNode);
+        }
+    }
+
+    /**
+     * Shared cache claim/publication path for rectangular structures and the SPS shape scanner.
+     */
+    protected void formFoundStructure(T previousStructure, String previousInventoryId, Set<Coord4D> previousLocations) {
+        Set<Coord4D> multiblockLocations = new ObjectOpenHashSet<>();
+        List<TileEntityMultiblock<T>> casings = new ArrayList<>();
+        for (Coord4D obj : structureFound.locations) {
+            TileEntity tileEntity = obj.getTileEntity(pointer.getWorld());
+            if (tileEntity instanceof TileEntityMultiblock<?> block && block.getManager() == getManager()) {
+                TileEntityMultiblock<T> multiblock = (TileEntityMultiblock<T>) block;
+                multiblockLocations.add(obj);
+                casings.add(multiblock);
+            }
+        }
+        long[] positions = multiblockLocations.stream().mapToLong(coord -> coord.getPos().toLong()).sorted().toArray();
+        try {
+            MultiblockPersistenceSession session = getManager().persistence(pointer.getWorld());
+            if (session == null) {
+                waitForCache(previousStructure);
+                return;
+            }
+            Map<ManagedCacheStore.SourceKey, List<TileEntityMultiblock<T>>> references = new LinkedHashMap<>();
+            for (TileEntityMultiblock<T> casing : casings) {
+                if (casing.cacheFormat < 0) throw new IOException("Unknown or corrupt managed cache reference");
+                if (casing.cachedID == null) continue;
+                UUID id = UUID.fromString(casing.cachedID);
+                ManagedCacheStore.SourceKey source;
+                if (casing.cacheFormat == 1) {
+                    source = ManagedCacheStore.SourceKey.managed(id);
+                    if (session.reserved(source)) {
+                        waitForCache(previousStructure);
+                        return;
+                    }
+                    if (session.entry(id) == null) {
+                        ManagedCacheStore.Entry recovered = session.resolve(source, positions);
+                        if (recovered == null)
+                            throw new IOException("Consumed managed reference does not belong to this structure");
+                        source = ManagedCacheStore.SourceKey.managed(recovered.id);
+                    }
+                } else {
+                    MultiblockPersistenceSession.LegacyStatus status = session.legacyStatus(id);
+                    if (status == MultiblockPersistenceSession.LegacyStatus.LOADING || status == MultiblockPersistenceSession.LegacyStatus.RESERVED) {
+                        waitForCache(previousStructure);
+                        return;
+                    }
+                    if (status == MultiblockPersistenceSession.LegacyStatus.FAILED)
+                        throw new IOException("Legacy history could not be loaded", session.legacyFailure());
+                    if (status == MultiblockPersistenceSession.LegacyStatus.CONFLICT)
+                        throw new IOException("Legacy UUID collides with managed authority");
+                    if (status == MultiblockPersistenceSession.LegacyStatus.INVALIDATED) {
+                        casing.cachedID = null;
+                        casing.cachedData = casing.getNewCache();
+                        casing.cachedDataTimestamp = Long.MIN_VALUE;
+                        casing.markDirty();
+                        continue;
+                    }
+                    if (status == MultiblockPersistenceSession.LegacyStatus.CONSUMED) {
+                        ManagedCacheStore.Entry recovered = session.resolve(ManagedCacheStore.SourceKey.legacy(id), positions);
+                        if (recovered == null)
+                            throw new IOException("Consumed legacy reference does not belong to this structure");
+                        source = ManagedCacheStore.SourceKey.managed(recovered.id);
+                    } else {
+                        getManager().updateCache(casing);
+                        source = ManagedCacheStore.SourceKey.legacy(id);
+                    }
+                }
+                references.computeIfAbsent(source, ignored -> new ArrayList<>()).add(casing);
+            }
+            if (references.isEmpty()) {
+                ManagedCacheStore.Entry retained = session.findByBinding(positions);
+                if (retained != null) {
+                    ManagedCacheStore.SourceKey source = ManagedCacheStore.SourceKey.managed(retained.id);
+                    if (session.reserved(source)) {
+                        waitForCache(previousStructure);
+                        return;
+                    }
+                    references.put(source, casings);
+                }
+            }
+            boolean legacyReuse = previousStructure != null && !previousStructure.destroyed && previousInventoryId != null &&
+                    previousLocations.equals(multiblockLocations) && references.size() == 1 &&
+                    references.keySet().iterator().next().equals(ManagedCacheStore.SourceKey.legacy(UUID.fromString(previousInventoryId)));
+            if (legacyReuse) {
+                MultiblockCache<T> cache = getManager().selectFormationCache(pointer.getWorld(), previousInventoryId, casings, structureFound);
+                cache.validateCapacity(structureFound);
+                publishFormation(cache, previousInventoryId, false);
+                return;
+            }
+
+            // Freeze every live source before deriving the submitted snapshot. This also flushes
+            // machine-specific destruction state (notably the induction-cell energy queue).
+            pauseSourceStructures(previousStructure);
+            List<MultiblockCache<T>> sources = new ArrayList<>();
+            for (Map.Entry<ManagedCacheStore.SourceKey, List<TileEntityMultiblock<T>>> reference : references.entrySet()) {
+                ManagedCacheStore.SourceKey key = reference.getKey();
+                T owner = key.legacy ? null : getManager().boundStructure(pointer.getWorld(), key.id.toString());
+                if (owner != null) throw new IOException("Managed cache is already bound to another live structure");
+                sources.add(key.legacy ? getManager().selectFormationCache(pointer.getWorld(), key.id.toString(), reference.getValue(), structureFound) :
+                        getManager().managedCache(pointer.getWorld(), key.id.toString(), pointer));
+            }
+            MultiblockCache<T> cache = previewMergedCache(sources, structureFound);
+            if (references.size() == 1) {
+                ManagedCacheStore.SourceKey only = references.keySet().iterator().next();
+                if (!only.legacy && session.entry(only.id).matchesBinding(positions)) {
+                    if (!getManager().bindManaged(pointer.getWorld(), only.id.toString(), positions, structureFound, cache)) {
+                        throw new IOException("Managed cache binding is not available");
+                    }
+                    publishFormation(cache, only.id.toString(), true);
+                    return;
+                }
+            }
+            getManager().beginTransfer(pointer.getWorld(), references.keySet(), positions, cache, casings);
+            pointer.requestCacheRetry();
+            pointer.reportCacheFormationFailure(null);
+        } catch (IOException | IllegalArgumentException error) {
+            pointer.reportCacheFormationFailure(error.getMessage());
+            pauseSourceStructures(previousStructure);
+        }
+    }
+
+    /**
+     * Detach while the unloading casing and any induction cells are still accessible.
+     */
+    public void detachCurrentStructure() {
+        if (pointer.structure != null) {
+            structureFound = pointer.structure;
+            pauseSourceStructures(pointer.structure);
+        }
+    }
+
+    private void waitForCache(T previousStructure) {
+        pauseSourceStructures(previousStructure);
+        pointer.reportCacheFormationFailure(null);
+        pointer.requestCacheRetry();
+    }
+
+    private void publishFormation(MultiblockCache<T> cache, String idToUse, boolean managed) {
+        pointer.reportCacheFormationFailure(null);
+        cache.apply(structureFound);
+        structureFound.inventoryID = idToUse;
+        structureFound.setFormed(true);
+
+        onFormed();
+
+        List<IStructuralMultiblock> structures = new ArrayList<>();
+        List<TileEntityMultiblock<T>> formedTiles = new ArrayList<>();
+        Coord4D toUse = null;
+
+        for (Coord4D obj : structureFound.locations) {
+            TileEntity tileEntity = obj.getTileEntity(pointer.getWorld());
+            if (tileEntity instanceof TileEntityMultiblock) {
+                TileEntityMultiblock<T> multiblock = (TileEntityMultiblock<T>) tileEntity;
+                multiblock.structure = structureFound;
+                multiblock.cacheFormat = managed ? 1 : 0;
+                multiblock.cachedID = idToUse;
+                formedTiles.add(multiblock);
+                if (toUse == null) {
+                    toUse = obj;
+                }
+            } else if (tileEntity instanceof IStructuralMultiblock block) {
+                structures.add(block);
+            }
+        }
+
+        //Remove all structural multiblocks from locations, set controllers
+        for (IStructuralMultiblock node : structures) {
+            if (node instanceof mekanism.common.tile.TileEntityStructuralGlass glass)
+                structureFound.bindStructuralGlass(glass, toUse);
+            else node.setController(toUse);
+            structureFound.locations.remove(Coord4D.get((TileEntity) node));
+        }
+        //Make the new shared state and ID visible immediately on every loaded replica. This
+        //also establishes the canonical manager cache before another neighbor callback can run.
+        for (TileEntityMultiblock<T> formedTile : formedTiles) {
+            formedTile.syncCachedDataFromStructure();
+            formedTile.markDirty();
+        }
+        TileEntityMultiblock<T> renderer = null;
+        for (TileEntityMultiblock<T> formedTile : formedTiles) {
+            if (formedTile.isRendering && renderer == null) {
+                renderer = formedTile;
+            } else {
+                formedTile.isRendering = false;
+            }
+        }
+        if (renderer == null && !formedTiles.isEmpty()) {
+            renderer = formedTiles.get(0);
+            renderer.isRendering = true;
+        }
+        structureFound.hasRenderer = renderer != null;
+        if (renderer != null) {
+            renderer.sendStructure = true;
+            //prevStructure remains true during an in-place rebuild, so the base tile tick
+            //will not automatically resend the new UUID and dimensions.
+            pointer.sendPacketToRenderer();
+        }
+    }
+
+    /**
+     * Pure preview used by both the legacy transition and the durable migration adapter.
+     */
+    protected MultiblockCache<T> previewMergedCache(Collection<MultiblockCache<T>> sources, T target) throws IOException {
+        MultiblockCache<T> result = null;
+        List<ItemStack> rejected = new ArrayList<>();
+        for (MultiblockCache<T> source : sources) {
+            source.validateCapacity(target);
+            NBTTagCompound snapshot = new NBTTagCompound();
+            source.save(snapshot);
+            MultiblockCache<T> detached = getNewCache();
+            detached.load(snapshot);
+            NBTTagCompound roundTrip = new NBTTagCompound();
+            detached.save(roundTrip);
+            if (!snapshot.equals(roundTrip))
+                throw new IOException("Cache snapshot cannot round-trip without changing stored state");
+            if (result == null) result = detached;
+            else {
+                result.validateMerge(detached);
+                mergeCaches(rejected, result, detached);
+                if (!rejected.isEmpty())
+                    throw new IOException("Merged items were rejected; source inventories are retained");
+            }
+        }
+        if (result == null) result = getNewCache();
+        result.validateCapacity(target);
+        return result;
+    }
+
+    /**
+     * Freeze a rejected/reconfiguring source without consuming its inventory or invalidating its ID.
+     */
+    protected void pauseSourceStructures(@Nullable T previous) {
+        Set<T> sources = Collections.newSetFromMap(new IdentityHashMap<>());
+        if (previous != null) sources.add(previous);
+        for (Coord4D coord : structureFound.locations) {
+            TileEntity tile = coord.getTileEntity(pointer.getWorld());
+            if (tile instanceof TileEntityMultiblock<?> multiblock && multiblock.getManager() == getManager() && multiblock.structure != null) {
+                sources.add((T) multiblock.structure);
+            }
+        }
+        for (T source : sources) {
+            if (!source.destroyed) {
+                onStructureDestroyed(source);
+                source.destroyed = true;
+            }
+            source.setFormed(false);
+            for (Coord4D coord : source.locations) {
+                TileEntity tile = coord.getTileEntity(pointer.getWorld());
+                if (tile instanceof TileEntityMultiblock<?> block && block.getManager() == getManager() && block.structure == source) {
+                    TileEntityMultiblock<T> casing = (TileEntityMultiblock<T>) block;
+                    casing.syncCachedDataFromStructure();
+                    getManager().updateCache(casing, true);
+                    casing.structure = null;
+                    casing.markDirty();
+                    casing.requestCacheRetry();
+                }
+            }
         }
     }
 

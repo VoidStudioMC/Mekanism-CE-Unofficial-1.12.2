@@ -1,14 +1,21 @@
 package mekanism.multiblockmachine.common.tile.generator;
 
 import io.netty.buffer.ByteBuf;
-import mekanism.api.Coord4D;
-import mekanism.api.TileNetworkList;
-import mekanism.api.gas.*;
+import mekanism.api.*;
+import mekanism.api.gas.GasStack;
 import mekanism.common.Mekanism;
 import mekanism.common.Upgrade;
 import mekanism.common.base.*;
 import mekanism.common.capabilities.Capabilities;
+import mekanism.common.capabilities.gas.BasicGasTank;
+import mekanism.common.capabilities.holder.gas.IGasTankHolder;
+import mekanism.common.capabilities.holder.gas.ProxiedGasTankHolder;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.inventory.container.slot.SlotOverlay;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.recipe.GasStackFuelToEnergyRecipe;
 import mekanism.common.recipe.RecipeHandler;
 import mekanism.common.recipe.inputs.GasInput;
@@ -17,6 +24,7 @@ import mekanism.common.util.*;
 import mekanism.generators.common.tile.TileEntityGenerator;
 import mekanism.multiblockmachine.client.render.block.generator.bloom.BloomRendererLargeGasGenerator;
 import mekanism.multiblockmachine.common.MekanismMultiblockMachine;
+import mekanism.multiblockmachine.common.MultiblockMachineUpgrades;
 import net.minecraft.block.Block;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
@@ -26,12 +34,15 @@ import net.minecraft.util.math.Vec3i;
 import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.energy.CapabilityEnergy;
 import net.minecraftforge.fml.common.FMLCommonHandler;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.annotation.Nonnull;
+import java.util.Collections;
 
-public class TileEntityLargeGasGenerator extends TileEntityGenerator implements IAdvancedBoundingBlock, IGasHandler, ISustainedData, IComparatorSupport, IMachineSlotTip, IUpgradeTile {
+public class TileEntityLargeGasGenerator extends TileEntityGenerator implements IAdvancedBoundingBlock, ISustainedData, IComparatorSupport, IUpgradeTile, ISpecialSelectionWireframeTile {
 
     private static final String[] methods = new String[]{"getEnergy", "getOutput", "getMaxEnergy", "getEnergyNeeded", "getGas", "getGasNeeded"};
     /**
@@ -41,7 +52,7 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     /**
      * The tank this block is storing fuel in.
      */
-    public GasTank fuelTank;
+    public BasicGasTank fuelTank;
 
     public int burnTicks = 0;
     public int maxBurnTicks;
@@ -49,40 +60,53 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     public double clientUsed;
     private int currentRedstoneLevel;
     public GasStackFuelToEnergyRecipe cachedRecipe;
+    private int cachedRecipeVersion = -1;
     public TileComponentUpgrade upgradeComponent;
     public int processes = MekanismConfig.current().multiblock.LargeGasGeneratorProcesses.val();
     public int numPowering;
+    private GasInventorySlot fuelSlot;
+    private EnergyInventorySlot energySlot;
 
     public TileEntityLargeGasGenerator() {
         super("gas", "LargeGasGenerator", 0, 0);
-        inventory = NonNullListSynchronized.withSize(3, ItemStack.EMPTY);
-        fuelTank = new GasTank(MAX_GAS);
-        upgradeComponent = new TileComponentUpgrade(this, 2, Upgrade.ENERGY);
-        upgradeComponent.setSupported(Upgrade.THREAD);
+        upgradeComponent = new TileComponentUpgrade(this, Upgrade.ENERGY);
+        setSupportedUpgrade(MultiblockMachineUpgrades.THREAD);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        fuelSlot = builder.addSlot(GasInventorySlot.fill(fuelTank, listener, 17, 35),
+                RelativeSide.FRONT, RelativeSide.LEFT, RelativeSide.BACK, RelativeSide.TOP, RelativeSide.BOTTOM);
+        fuelSlot.setSlotOverlay(SlotOverlay.MINUS);
+        energySlot = builder.addSlot(EnergyInventorySlot.drain(this, listener, 143, 35), RelativeSide.RIGHT);
+        return builder.build();
+    }
+
+    @Override
+    protected IGasTankHolder getInitialGasTanks(IContentsListener listener) {
+        fuelTank = new FuelTank(listener);
+        return ProxiedGasTankHolder.create(
+                this::isGasInputSide,
+                side -> false,
+                side -> side == null || isGasInputSide(side) ? Collections.singletonList(fuelTank) : Collections.emptyList()
+        );
+    }
+
+    private boolean isGasInputSide(@Nullable EnumFacing side) {
+        return side != null && side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN;
     }
 
     @Override
     public void onAsyncUpdateServer() {
         super.onAsyncUpdateServer();
-        ChargeUtils.charge(1, this);
-        if (!inventory.get(0).isEmpty() && fuelTank.getStored() < MAX_GAS) {
-            Gas gasType = null;
-            if (fuelTank.getGas() != null) {
-                gasType = fuelTank.getGas().getGas();
-            } else if (!inventory.get(0).isEmpty() && inventory.get(0).getItem() instanceof IGasItem gasItem) {
-                if (gasItem.getGas(inventory.get(0)) != null) {
-                    gasType = gasItem.getGas(inventory.get(0)).getGas();
-                }
-            }
-            if (gasType != null && RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.containsRecipe(gasType)) {
-                GasStack removed = GasUtils.removeGas(inventory.get(0), gasType, fuelTank.getNeeded());
-                fuelTank.receive(removed, true);
-            }
-        }
+        energySlot.drainContainer();
+        fuelSlot.fillTank();
 
-        boolean operate = canOperate();
         GasStackFuelToEnergyRecipe recipe = getRecipe();
-        if (operate && getEnergy() + generationRate < getMaxEnergy()) {
+        boolean operate = recipe != null && canOperate();
+        if (operate && getEnergyContainer().insert(generationRate, Action.SIMULATE, AutomationType.INTERNAL) == 0) {
             setActive(true);
             if (fuelTank.getStored() != 0) {
                 maxBurnTicks = recipe.getInput().ingredient.amount;
@@ -92,13 +116,13 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
 
             int total = burnTicks + fuelTank.getStored() * maxBurnTicks;
             total -= toUse;
-            setEnergy(getEnergy() + generationRate * toUse);
+            getEnergyContainer().insert(generationRate * toUse, Action.EXECUTE, AutomationType.INTERNAL);
 
             if (fuelTank.getStored() > 0) {
-                fuelTank.setGas(new GasStack(fuelTank.getGasType(), total / maxBurnTicks));
+                fuelTank.setStackSize(total / maxBurnTicks, Action.EXECUTE);
             }
             burnTicks = total % maxBurnTicks;
-            clientUsed = toUse /(double)  maxBurnTicks;
+            clientUsed = toUse / (double) maxBurnTicks;
         } else {
             if (!operate) {
                 reset();
@@ -115,13 +139,28 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
 
     @Override
     public void addTileSyncTask() {
-        CableUtils.emit(this, 3);
+        if (getEnergy() > 0) {
+            CableUtils.emit(this, 3);
+        }
+    }
+
+    @Override
+    protected boolean supportsAsyncIdleSkipping() {
+        return getClass() == TileEntityLargeGasGenerator.class;
+    }
+
+    @Override
+    protected boolean isAsyncUpdateIdle() {
+        return fuelTank.isEmpty() && fuelSlot.isEmpty() && energySlot.isEmpty() && burnTicks == 0 &&
+                maxBurnTicks == 0 && generationRate == 0 && clientUsed == 0 && !getActive() &&
+                cachedRecipeVersion == RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.getRecipeVersion() &&
+                currentRedstoneLevel == getRedstoneLevel();
     }
 
     public int getThread() {
         int thread = 1;
-        if (upgradeComponent.isUpgradeInstalled(Upgrade.THREAD)) {
-            thread += upgradeComponent.getUpgrades(Upgrade.THREAD);
+        if (isUpgradeInstalled(MultiblockMachineUpgrades.THREAD)) {
+            thread += getInstalledUpgrades(MultiblockMachineUpgrades.THREAD);
         }
         return thread;
     }
@@ -147,33 +186,16 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     @Override
     public boolean canExtractItem(int slotID, @Nonnull ItemStack itemstack, @Nonnull EnumFacing side) {
         if (slotID == 1) {
-            return ChargeUtils.canBeOutputted(itemstack, true);
+            return EnergyInventorySlot.drainExtractCheck(this, itemstack);
         } else if (slotID == 0) {
-            return itemstack.getItem() instanceof IGasItem gasItem && gasItem.getGas(itemstack) == null;
+            return GasInventorySlot.fillExtractCheck(fuelTank, itemstack);
         }
         return false;
     }
 
     @Override
-    public boolean isItemValidForSlot(int slotID, @Nonnull ItemStack itemstack) {
-        if (slotID == 0) {
-            return itemstack.getItem() instanceof IGasItem gasItem && gasItem.getGas(itemstack) != null &&
-                    RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.containsRecipe(gasItem.getGas(itemstack).getGas());
-        } else if (slotID == 1) {
-            return ChargeUtils.canBeCharged(itemstack);
-        }
-        return true;
-    }
-
-    @Nonnull
-    @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return side == MekanismUtils.getRight(facing) ? new int[]{1} : new int[]{0};
-    }
-
-    @Override
     public boolean canOperate() {
-        return (fuelTank.getStored() > 0 || burnTicks > 0) && MekanismUtils.canFunction(this);
+        return (fuelTank.getStored() > 0 || burnTicks > 0) && getRecipe() != null && MekanismUtils.canFunction(this);
     }
 
     @Override
@@ -219,59 +241,29 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     }
 
     @Override
-    public int receiveGas(EnumFacing side, GasStack stack, boolean doTransfer) {
-        boolean isTankEmpty = fuelTank.getGas() == null;
-        if (canReceiveGas(side, stack.getGas()) && (isTankEmpty || fuelTank.getGas().isGasEqual(stack))) {
-            return fuelTank.receive(stack, doTransfer);
-        }
-        return 0;
-    }
-
-    @Nonnull
-    @Override
-    public GasTankInfo[] getTankInfo() {
-        return new GasTankInfo[]{fuelTank};
-    }
-
-    @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
-        fuelTank.read(nbtTags.getCompoundTag("fuelTank"));
+        if (!hasStoredGasTanks(nbtTags) && nbtTags.hasKey("fuelTank")) {
+            fuelTank.read(nbtTags.getCompoundTag("fuelTank"));
+        }
+        sanitizeFuelTank();
+        updateOutputFromFuel(fuelTank.getGas());
         numPowering = nbtTags.getInteger("numPowering");
     }
 
     @Override
     public void writeCustomNBT(NBTTagCompound nbtTags) {
         super.writeCustomNBT(nbtTags);
-        nbtTags.setTag("fuelTank", fuelTank.write(new NBTTagCompound()));
         nbtTags.setInteger("numPowering", numPowering);
     }
 
     @Override
-    public boolean canReceiveGas(EnumFacing side, Gas type) {
-        return RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.containsRecipe(type) && side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN;
-    }
-
-    @Override
-    public GasStack drawGas(EnumFacing side, int amount, boolean doTransfer) {
-        return null;
-    }
-
-    @Override
-    public boolean canDrawGas(EnumFacing side, Gas type) {
-        return false;
-    }
-
-    @Override
     public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing side) {
-        return (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY) || super.hasCapability(capability, side);
+        return super.hasCapability(capability, side);
     }
 
     @Override
     public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing side) {
-        if (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY) {
-            return Capabilities.GAS_HANDLER_CAPABILITY.cast(this);
-        }
         return super.getCapability(capability, side);
     }
 
@@ -280,8 +272,7 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         EnumFacing left = MekanismUtils.getLeft(facing);
         EnumFacing right = MekanismUtils.getRight(facing);
         EnumFacing back = MekanismUtils.getBack(facing);
-        if ((side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY)
-                || (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN && (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)))) {
+        if (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN && (isManagedStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side))) {
             return true;
         }
         return super.isCapabilityDisabled(capability, side);
@@ -290,16 +281,32 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
 
     @Override
     public void writeSustainedData(ItemStack itemStack) {
-        if (fuelTank != null) {
-            ItemDataUtils.setCompound(itemStack, "fuelTank", fuelTank.write(new NBTTagCompound()));
-        }
+        writeSustainedGasTanks(itemStack);
+        ItemDataUtils.setLegacyGasTank(itemStack, "fuelTank", fuelTank);
     }
 
     @Override
     public void readSustainedData(ItemStack itemStack) {
-        if (ItemDataUtils.hasData(itemStack, "fuelTank")) {
-            fuelTank.read(ItemDataUtils.getCompound(itemStack, "fuelTank"));
+        boolean loadedTank = readSustainedGasTanks(itemStack);
+        loadedTank = loadedTank || ItemDataUtils.readLegacyGasTank(itemStack, "fuelTank", fuelTank);
+        if (loadedTank) {
+            sanitizeFuelTank();
+            updateOutputFromFuel(fuelTank.getGas());
         }
+    }
+
+    private void sanitizeFuelTank() {
+        GasStack stored = fuelTank.getGas();
+        if (stored != null && (stored.amount <= 0 || stored.getGas() == null)) {
+            fuelTank.setEmpty();
+        } else if (stored != null) {
+            fuelTank.setStackSize(stored.amount, Action.EXECUTE);
+        }
+    }
+
+    @Override
+    public boolean isComparatorInput(mekanism.api.transmitters.TransmissionType type) {
+        return type == mekanism.api.transmitters.TransmissionType.GAS;
     }
 
     @Override
@@ -307,23 +314,12 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         return MekanismUtils.redstoneLevelFromContents(fuelTank.getStored(), fuelTank.getMaxGas());
     }
 
-    @Override
-    public boolean getEnergySlot() {
-        return inventory.get(1).isEmpty();
-    }
-
-    @Override
-    public boolean getInputSlot() {
-        return false;
-    }
-
-    @Override
-    public boolean getOuputSlot() {
-        return false;
-    }
-
-
     public GasStackFuelToEnergyRecipe getRecipe() {
+        int recipeVersion = RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.getRecipeVersion();
+        if (cachedRecipeVersion != recipeVersion) {
+            cachedRecipe = null;
+            cachedRecipeVersion = recipeVersion;
+        }
         GasInput input = getInput();
         if (cachedRecipe == null || !input.testEquality(cachedRecipe.getInput())) {
             cachedRecipe = RecipeHandler.getGasStackFuelToEnergyRecipe(getInput());
@@ -385,45 +381,38 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     }
 
     @Override
-    public void onPlace() {
+    public void collectBoundingBlocks(java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
         for (int y = 0; y <= 2; y++) {
             for (int x = -1; x <= 1; x++) {
                 for (int z = -1; z <= 1; z++) {
                     if (x == 0 && y == 0 && z == 0) {
                         continue;
                     }
-                    if (y != 2) {
-                        if (x == z || x == -z ||
-                                facing == EnumFacing.NORTH && (x == 0 && z == -1) ||
-                                facing == EnumFacing.WEST && (z == 0 && x == -1) ||
-                                facing == EnumFacing.SOUTH && (x == 0 && z == 1) ||
-                                facing == EnumFacing.EAST && (z == 0 && x == 1)) {
-                            MekanismUtils.makeBoundingBlock(world, getPos().add(x, y, z), Coord4D.get(this));
-                        } else {
-                            MekanismUtils.makeAdvancedBoundingBlock(world, getPos().add(x, y, z), Coord4D.get(this));
-                        }
+                    boolean advanced;
+                    if (y == 2) {
+                        advanced = x == 0 && z == 0;
                     } else {
-                        if (x == 0 && z == 0) {
-                            MekanismUtils.makeAdvancedBoundingBlock(world, getPos().add(x, y, z), Coord4D.get(this));
-                        } else {
-                            MekanismUtils.makeBoundingBlock(world, getPos().add(x, y, z), Coord4D.get(this));
-                        }
+                        boolean normal = x == z || x == -z ||
+                                facing == EnumFacing.NORTH && x == 0 && z == -1 ||
+                                facing == EnumFacing.WEST && z == 0 && x == -1 ||
+                                facing == EnumFacing.SOUTH && x == 0 && z == 1 ||
+                                facing == EnumFacing.EAST && z == 0 && x == 1;
+                        advanced = !normal;
                     }
-                    world.notifyNeighborsOfStateChange(getPos().add(x, y, z), getBlockType(), true);
+                    consumer.accept(getPos().add(x, y, z), advanced);
                 }
             }
         }
     }
 
     @Override
+    public void onPlace() {
+        tryPlaceBoundingBlocks(world, Coord4D.get(this));
+    }
+
+    @Override
     public void onBreak() {
-        for (int y = 0; y <= 2; y++) {
-            for (int x = -1; x <= 1; x++) {
-                for (int z = -1; z <= 1; z++) {
-                    world.setBlockToAir(getPos().add(x, y, z));
-                }
-            }
-        }
+        removeBoundingBlocks(world, getPos());
     }
 
     @Override
@@ -434,8 +423,15 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         if (isOffsetCapabilityDisabled(capability, side, offset)) {
             return false;
         }
-        if ((side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN && (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side))) || (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY)) {
-            return true;
+        if (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN) {
+            if (isManagedStrictEnergy(capability)) {
+                return getEnergyHandler(capability, side) != null;
+            } else if (capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
+                return true;
+            }
+        }
+        if (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY) {
+            return getGasHandler(side) != null;
         }
         return hasCapability(capability, side);
     }
@@ -448,15 +444,15 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         if (isOffsetCapabilityDisabled(capability, side, offset)) {
             return null;
         } else if (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN) {
-            if (isStrictEnergy(capability)) {
-                return (T) this;
+            if (isManagedStrictEnergy(capability)) {
+                return getEnergyHandler(capability, side);
             } else if (isTesla(capability, side)) {
                 return (T) getTeslaEnergyWrapper(side);
             } else if (capability == CapabilityEnergy.ENERGY) {
                 return CapabilityEnergy.ENERGY.cast(getForgeEnergyWrapper(side));
             }
         } else if (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY) {
-            return Capabilities.GAS_HANDLER_CAPABILITY.cast(this);
+            return Capabilities.GAS_HANDLER_CAPABILITY.cast(getGasHandler(side));
         }
         return getCapability(capability, side);
     }
@@ -466,10 +462,11 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         EnumFacing left = MekanismUtils.getLeft(facing);
         EnumFacing right = MekanismUtils.getRight(facing);
         EnumFacing back = MekanismUtils.getBack(facing);
-        if (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN && (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side))) {
+        if (side != facing && side != left && side != right && side != back && side != EnumFacing.DOWN && (isManagedStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side))) {
             if (offset.equals(new Vec3i(0, 2, 0))) {
                 return side != EnumFacing.UP;
             }
+            return true;
         } else if (side != facing && side != EnumFacing.UP && side != EnumFacing.DOWN && capability == Capabilities.GAS_HANDLER_CAPABILITY) {
             for (int y = 0; y < 1; y++) {
                 if (offset.equals(new Vec3i(back.getXOffset(), y, back.getZOffset()))) {
@@ -480,7 +477,7 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
                     return side != right;
                 }
             }
-
+            return true;
         }
         return false;
     }
@@ -500,12 +497,20 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
         return side == EnumFacing.UP;
     }
 
+    private boolean isManagedStrictEnergy(@Nonnull Capability<?> capability) {
+        return capability == Capabilities.STRICT_ENERGY_CAPABILITY || isStrictEnergy(capability);
+    }
+
     @Override
     public void validate() {
         super.validate();
         if (isRemote()) {
             if (Mekanism.hooks.Bloom && MekanismConfig.current().client.enableBloom.val()) {
-                new BloomRendererLargeGasGenerator(this);
+                try {
+                    new BloomRendererLargeGasGenerator(this);
+                } catch (LinkageError e) {
+                    mekanism.common.util.BloomDependencyHelper.disableBloom("BloomRendererLargeGasGenerator", e);
+                }
             }
         }
     }
@@ -528,12 +533,12 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
 
     @Override
     public double getMaxOutput() {
-        return (upgradeComponent.isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy()) * 2;
+        return (isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy()) * 2;
     }
 
     @Override
     public double getMaxEnergy() {
-        return upgradeComponent.isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy();
+        return isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy();
     }
 
     public double getTierEnergy() {
@@ -549,9 +554,49 @@ public class TileEntityLargeGasGenerator extends TileEntityGenerator implements 
     }
 
     @Override
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.multiblockmachine.client.model.generator.ModelLargeGasGenerator.class;
+    }
+
+    @Override
     protected boolean shouldDumpRadiation() {
         return true;
     }
+
+    private void updateOutputFromFuel(@Nullable GasStack stack) {
+        if (stack == null || stack.amount <= 0) {
+            return;
+        }
+        GasStackFuelToEnergyRecipe recipe = RecipeHandler.getGasStackFuelToEnergyRecipe(stack);
+        if (recipe != null) {
+            output = recipe.getOutput().energyOutput * 2;
+        }
+    }
+
+    private class FuelTank extends BasicGasTank {
+
+        private FuelTank(IContentsListener listener) {
+            super(MAX_GAS, BasicGasTank.notExternal, BasicGasTank.alwaysTrueBi,
+                    gas -> RecipeHandler.Recipe.GAS_FUEL_TO_ENERGY_RECIPE.containsRecipe(gas), listener);
+        }
+
+        @Override
+        public void setStack(GasStack stack) {
+            boolean wasEmpty = isEmpty();
+            super.setStack(stack);
+            if (wasEmpty) {
+                updateOutputFromFuel(stack);
+            }
+        }
+
+        @Override
+        public void setStackUnchecked(GasStack stack) {
+            boolean wasEmpty = isEmpty();
+            super.setStackUnchecked(stack);
+            if (wasEmpty) {
+                updateOutputFromFuel(stack);
+            }
+        }
+    }
 }
-
-

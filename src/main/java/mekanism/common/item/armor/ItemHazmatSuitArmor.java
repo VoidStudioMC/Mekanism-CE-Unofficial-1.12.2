@@ -9,20 +9,24 @@ import mekanism.common.integration.MekanismHooks;
 import net.minecraft.enchantment.Enchantment;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.SoundEvents;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemArmor;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.world.World;
 import net.minecraftforge.common.capabilities.ICapabilityProvider;
 import net.minecraftforge.common.util.EnumHelper;
 import net.minecraftforge.fml.common.Optional.Interface;
 import net.minecraftforge.fml.common.Optional.Method;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
+import java.util.List;
 
 @Interface(iface = "ic2.api.item.IHazmatLike", modid = MekanismHooks.IC2_MOD_ID)
-public class ItemHazmatSuitArmor extends ItemArmor implements IHazmatLike{
+public class ItemHazmatSuitArmor extends ItemArmor implements IHazmatLike {
 
     public static ArmorMaterial MekHazmat = EnumHelper.addArmorMaterial("mekhazmat", "mekanism:hazmat", 0, new int[]{0, 0, 0, 0}, 0, SoundEvents.ITEM_ARMOR_EQUIP_GENERIC, 0.0F);
 
@@ -54,8 +58,30 @@ public class ItemHazmatSuitArmor extends ItemArmor implements IHazmatLike{
 
     @Override
     public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
-        return new ItemCapabilityWrapper(stack, RadiationShieldingHandler.create(item -> getShieldingByArmor(armorType)),
-                NCRadiationShieldingHandler.create(item -> getShieldingByArmor(armorType) * 100, item -> getShieldingByArmor(armorType) * 100));
+        List<ItemCapabilityWrapper.ItemCapability> capabilities = new ArrayList<>();
+        capabilities.add(RadiationShieldingHandler.create(item -> getShieldingByArmor(armorType)));
+        if (mekanism.common.capabilities.Capabilities.NC_CAPABILITY_RADIATION_RESISTANCE != null) {
+            capabilities.add(NCRadiationShieldingHandler.create(item -> getShieldingByArmor(armorType) * 100, item -> 0, false));
+        }
+        return new ItemCapabilityWrapper(stack, capabilities.toArray(new ItemCapabilityWrapper.ItemCapability[0]));
+    }
+
+    @Override
+    public void onUpdate(ItemStack stack, World world, Entity entity, int itemSlot, boolean isSelected) {
+        super.onUpdate(stack, world, entity, itemSlot, isSelected);
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
+    }
+
+    @Override
+    public void onCreated(ItemStack stack, World world, EntityPlayer player) {
+        super.onCreated(stack, world, player);
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
+    }
+
+    @Override
+    public void onArmorTick(World world, EntityPlayer player, ItemStack stack) {
+        super.onArmorTick(world, player, stack);
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
     }
 
     @Override

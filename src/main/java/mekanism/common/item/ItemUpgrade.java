@@ -1,5 +1,6 @@
 package mekanism.common.item;
 
+import mekanism.api.Action;
 import mekanism.api.EnumColor;
 import mekanism.common.Upgrade;
 import mekanism.common.base.IUpgradeItem;
@@ -17,6 +18,7 @@ import net.minecraft.util.EnumActionResult;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.text.ITextComponent;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
@@ -24,16 +26,22 @@ import org.lwjgl.input.Keyboard;
 
 import javax.annotation.Nonnull;
 import java.util.List;
+import java.util.Objects;
 
 public class ItemUpgrade extends ItemMekanism implements IUpgradeItem {
 
-    private Upgrade upgrade;
+    private final Upgrade upgrade;
 
     public ItemUpgrade(Upgrade type) {
         super();
-        upgrade = type;
+        upgrade = Objects.requireNonNull(type, "Upgrade type cannot be null");
         setMaxStackSize(type.getMaxItemStackSize());
         setRarity(EnumRarity.UNCOMMON);
+    }
+
+    @Override
+    public int getItemStackLimit(ItemStack stack) {
+        return upgrade.getMaxItemStackSize();
     }
 
     @Override
@@ -57,7 +65,6 @@ public class ItemUpgrade extends ItemMekanism implements IUpgradeItem {
         if (player.isSneaking()) {
             TileEntity tile = world.getTileEntity(pos);
             ItemStack stack = player.getHeldItem(hand);
-            Upgrade type = getUpgradeType(stack);
             //看看目标是不是虚拟方块，
             if (tile instanceof TileEntityBoundingBlock block) {
                 //如果是虚拟方块,且主方块不是空的
@@ -68,16 +75,21 @@ public class ItemUpgrade extends ItemMekanism implements IUpgradeItem {
             }
 
             if (tile instanceof IUpgradeTile upgradeTile && upgradeTile.supportsUpgrades()) {
-                if (upgradeTile.supportsUpgrade(type)) {
+                if (upgradeTile.canInstallUpgrade(stack)) {
                     TileComponentUpgrade component = upgradeTile.getComponent();
-                    if (!world.isRemote && component.getUpgrades(type) < type.getMaxInstalled()) {
-                        int added = component.addUpgrades(type, stack.getCount());
-                        if (added > 0) {
-                            stack.shrink(added);
+                    if (!world.isRemote) {
+                        component.installUpgrade(stack, Action.EXECUTE);
+                    }
+                    return EnumActionResult.SUCCESS;
+                } else if (stack.getItem() instanceof IUpgradeItem upgradeItem) {
+                    ITextComponent message = upgradeItem.getInstallFailureMessage(stack, upgradeTile);
+                    if (message != null) {
+                        if (!world.isRemote) {
+                            player.sendMessage(message);
                         }
+                        return EnumActionResult.SUCCESS;
                     }
                 }
-                return EnumActionResult.SUCCESS;
             }
         }
         return EnumActionResult.PASS;

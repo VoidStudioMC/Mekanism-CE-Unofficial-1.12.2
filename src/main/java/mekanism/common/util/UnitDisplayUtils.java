@@ -9,6 +9,18 @@ import mekanism.common.MekanismLang;
  */
 public class UnitDisplayUtils {
 
+    private static final Unit IGNORED_UNIT = new Unit() {
+        @Override
+        public String getSymbol() {
+            return "";
+        }
+
+        @Override
+        public ILangEntry getLabel() {
+            return MekanismLang.ERROR;
+        }
+    };
+
     /**
      * Displays the unit as text. Does handle negative numbers, and will place a negative sign in front of the output string showing this. Use string.replace to remove
      * the negative sign if unwanted
@@ -50,6 +62,10 @@ public class UnitDisplayUtils {
 
     public static String getDisplayShort(double value, ElectricUnit unit, int decimalPlaces) {
         return getDisplay(value, unit, decimalPlaces, true);
+    }
+
+    public static String getDisplay(double value, int decimalPlaces) {
+        return getDisplayBase(value, IGNORED_UNIT, decimalPlaces, false);
     }
 
     public static String getDisplaySimple(double value, ElectricUnit unit, int decimalPlaces) {
@@ -110,8 +126,16 @@ public class UnitDisplayUtils {
     }
 
     public static double roundDecimals(double d, int decimalPlaces) {
-        int j = (int) (d * Math.pow(10, decimalPlaces));
-        return j / Math.pow(10, decimalPlaces);
+        double factor = Math.pow(10, decimalPlaces);
+        if (!Double.isFinite(d) || !Double.isFinite(factor) || factor == 0) {
+            return d;
+        }
+        double scaled = d * factor;
+        if (!Double.isFinite(scaled)) {
+            return d;
+        }
+        //Preserve the old truncation-towards-zero behavior without narrowing to int.
+        return (scaled < 0 ? Math.ceil(scaled) : Math.floor(scaled)) / factor;
     }
 
     public static double roundDecimals(double d) {

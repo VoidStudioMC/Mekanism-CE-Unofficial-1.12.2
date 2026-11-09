@@ -29,6 +29,8 @@ public class RecipeInfoHelper {
             return "[" + getGasName(out.leftGas) + ", " + getGasName(out.rightGas) + "]";
         } else if (output instanceof ChanceOutput chanceOutput) {
             return getItemName(chanceOutput.primaryOutput);
+        } else if (output instanceof FarmOutput farmOutput) {
+            return getItemName(farmOutput.getGuaranteedOutput());
         } else if (output instanceof PressurizedOutput out) {
             return "[" + getItemName(out.getItemOutput()) + ", " + getGasName(out.getGasOutput()) + "]";
         }
@@ -36,18 +38,30 @@ public class RecipeInfoHelper {
     }
 
     public static String getGasName(GasStack stack) {
+        if (stack == null || stack.getGas() == null) {
+            return "nothing";
+        }
         return stack.amount > 1 ? String.format("<gas:%s> * %s", stack.getGas().getName(), stack.amount) : getGasName(stack.getGas());
     }
 
     public static String getGasName(Gas gas) {
+        if (gas == null) {
+            return "nothing";
+        }
         return String.format("<gas:%s>", gas.getName());
     }
 
     public static String getFluidName(FluidStack stack) {
+        if (stack == null || stack.getFluid() == null) {
+            return "nothing";
+        }
         return stack.amount > 1 ? String.format("<liquid:%s> * %s", stack.getFluid().getName(), stack.amount) : getFluidName(stack.getFluid());
     }
 
     public static String getFluidName(Fluid fluid) {
+        if (fluid == null) {
+            return "nothing";
+        }
         return String.format("<liquid:%s>", fluid.getName());
     }
 

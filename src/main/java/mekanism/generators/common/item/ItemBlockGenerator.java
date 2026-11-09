@@ -3,41 +3,40 @@ package mekanism.generators.common.item;
 import cofh.redstoneflux.api.IEnergyContainerItem;
 import ic2.api.item.IElectricItemManager;
 import ic2.api.item.ISpecialElectricItem;
+import mekanism.api.Action;
 import mekanism.api.EnumColor;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.functions.ConstantPredicates;
 import mekanism.client.MekKeyHandler;
 import mekanism.client.MekanismClient;
 import mekanism.client.MekanismKeyHandler;
-import mekanism.common.base.ISustainedData;
-import mekanism.common.base.ISustainedInventory;
 import mekanism.common.base.ISustainedTank;
 import mekanism.common.capabilities.ItemCapabilityWrapper;
+import mekanism.common.capabilities.energy.item.RateLimitEnergyHandler;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.integration.MekanismHooks;
 import mekanism.common.integration.forgeenergy.ForgeEnergyItemWrapper;
 import mekanism.common.integration.ic2.IC2ItemManager;
 import mekanism.common.integration.redstoneflux.RFIntegration;
 import mekanism.common.integration.tesla.TeslaItemWrapper;
+import mekanism.common.item.interfaces.IItemBlockPlacementData;
+import mekanism.common.item.interfaces.IItemSustainedInventory;
+import mekanism.common.item.interfaces.ILegacyEnergizedItem;
 import mekanism.common.security.ISecurityItem;
-import mekanism.common.security.ISecurityTile;
 import mekanism.common.security.ISecurityTile.SecurityMode;
-import mekanism.common.tile.prefab.TileEntityBasicBlock;
-import mekanism.common.tile.prefab.TileEntityElectricBlock;
-import mekanism.common.util.ItemDataUtils;
-import mekanism.common.util.LangUtils;
-import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.SecurityUtils;
+import mekanism.common.util.*;
 import mekanism.generators.common.block.states.BlockStateGenerator.GeneratorType;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.util.ITooltipFlag;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
@@ -64,7 +63,8 @@ import java.util.UUID;
         @Interface(iface = "cofh.redstoneflux.api.IEnergyContainerItem", modid = MekanismHooks.REDSTONEFLUX_MOD_ID),
         @Interface(iface = "ic2.api.item.ISpecialElectricItem", modid = MekanismHooks.IC2_MOD_ID)
 })
-public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISpecialElectricItem, ISustainedInventory, ISustainedTank, IEnergyContainerItem, ISecurityItem {
+public class ItemBlockGenerator extends ItemBlock implements ILegacyEnergizedItem, ISpecialElectricItem, IItemSustainedInventory, ISustainedTank, IEnergyContainerItem,
+        ISecurityItem, IItemBlockPlacementData {
 
     public Block metaBlock;
 
@@ -122,7 +122,7 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
                 }
 
                 list.add(EnumColor.BRIGHT_GREEN + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY
-                        + MekanismUtils.getEnergyDisplay(getEnergy(itemstack), getMaxEnergy(itemstack)));
+                        + MekanismUtils.getEnergyDisplay(StorageUtils.getStoredEnergy(itemstack), getEnergyCapacity(itemstack)));
 
                 if (hasTank(itemstack)) {
                     if (getFluidStack(itemstack) != null) {
@@ -148,70 +148,50 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
     @Override
     public boolean placeBlockAt(@Nonnull ItemStack stack, @Nonnull EntityPlayer player, World world, @Nonnull BlockPos pos, EnumFacing side, float hitX, float hitY,
                                 float hitZ, @Nonnull IBlockState state) {
-        if (MekanismConfig.current().general.destroyDisabledBlocks.val()){
+        if (MekanismConfig.current().general.destroyDisabledBlocks.val()) {
             GeneratorType type = GeneratorType.get(stack);
             if (type != null && !type.isEnabled()) {
                 return false;
             }
         }
+        GeneratorType type = GeneratorType.get(stack);
+        if (type == null) {
+            return false;
+        }
         boolean place = true;
         Block block = world.getBlockState(pos).getBlock();
-        if (stack.getItemDamage() == GeneratorType.ADVANCED_SOLAR_GENERATOR.meta) {
-            if (!(block.isReplaceable(world, pos) && world.isAirBlock(pos.add(0, 1, 0)))) {
+        if (type == GeneratorType.ADVANCED_SOLAR_GENERATOR) {
+            if (!block.isReplaceable(world, pos) || !MekanismUtils.isValidBoundingBlockPosition(world, pos.up(), pos)) {
                 return false;
             }
             outer:
             for (int xPos = -1; xPos <= 1; xPos++) {
                 for (int zPos = -1; zPos <= 1; zPos++) {
-                    if (!world.isAirBlock(pos.add(xPos, 2, zPos)) || pos.getY() + 2 > 255) {
+                    if (!MekanismUtils.isValidBoundingBlockPosition(world, pos.add(xPos, 2, zPos), pos)) {
                         place = false;
                         break outer;
                     }
                 }
             }
-        } else if (stack.getItemDamage() == GeneratorType.WIND_GENERATOR.meta) {
+        } else if (type == GeneratorType.WIND_GENERATOR) {
             if (!block.isReplaceable(world, pos)) {
                 return false;
             }
             for (int yPos = 1; yPos <= 4; yPos++) {
-                if (!world.isAirBlock(pos.add(0, yPos, 0)) || pos.getY() + yPos > 255) {
+                if (!MekanismUtils.isValidBoundingBlockPosition(world, pos.up(yPos), pos)) {
                     place = false;
                     break;
                 }
             }
         }
 
-        if (place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state)) {
-            TileEntityBasicBlock tileEntity = (TileEntityBasicBlock) world.getTileEntity(pos);
-            if (tileEntity instanceof ISecurityTile security) {
-                security.getSecurity().setOwnerUUID(getOwnerUUID(stack));
-                if (hasSecurity(stack)) {
-                    security.getSecurity().setMode(getSecurity(stack));
-                }
-                if (getOwnerUUID(stack) == null) {
-                    security.getSecurity().setOwnerUUID(player.getUniqueID());
-                }
-            }
+        return place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state);
+    }
 
-            if (tileEntity instanceof TileEntityElectricBlock entityElectricBlock) {
-                entityElectricBlock.electricityStored.set(getEnergy(stack));
-            }
-            if (tileEntity instanceof ISustainedInventory inventory) {
-                inventory.setInventory(getInventory(stack));
-            }
-            if (tileEntity instanceof ISustainedData data) {
-                if (stack.getTagCompound() != null) {
-                    data.readSustainedData(stack);
-                }
-            }
-            if (tileEntity instanceof ISustainedTank tank) {
-                if (hasTank(stack) && getFluidStack(stack) != null) {
-                    tank.setFluidStack(getFluidStack(stack), stack);
-                }
-            }
-            return true;
-        }
-        return false;
+    @Override
+    public void restorePlacementData(@Nonnull ItemStack stack, @Nonnull EntityLivingBase placer, @Nonnull World world, @Nonnull BlockPos pos,
+                                     @Nonnull TileEntity tileEntity) {
+        MekanismPlacementData.restoreCommon(stack, placer, tileEntity);
     }
 
     @Override
@@ -232,80 +212,66 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
     @Override
     public void setFluidStack(FluidStack fluidStack, Object... data) {
         if (data[0] instanceof ItemStack itemStack) {
-            if (fluidStack == null || fluidStack.amount == 0) {
-                ItemDataUtils.removeData(itemStack, "fluidTank");
-            } else {
-                ItemDataUtils.setCompound(itemStack, "fluidTank", fluidStack.writeToNBT(new NBTTagCompound()));
-            }
+            ItemDataUtils.setStoredFluid(itemStack, "fluidTank", fluidStack, Integer.MAX_VALUE);
         }
     }
 
     @Override
     public FluidStack getFluidStack(Object... data) {
         if (data[0] instanceof ItemStack itemStack) {
-            if (!ItemDataUtils.hasData(itemStack, "fluidTank")) {
-                return null;
-            }
-            return FluidStack.loadFluidStackFromNBT(ItemDataUtils.getCompound(itemStack, "fluidTank"));
+            return ItemDataUtils.getStoredFluid(itemStack, "fluidTank");
         }
         return null;
     }
 
     @Override
     public boolean hasTank(Object... data) {
-        return data[0] instanceof ItemStack stack && stack.getItem() instanceof ISustainedTank && (stack.getItemDamage() == 2);
-    }
-
-    @Override
-    public double getEnergy(ItemStack itemStack) {
-        return ItemDataUtils.getDouble(itemStack, "energyStored");
-    }
-
-    @Override
-    public void setEnergy(ItemStack itemStack, double amount) {
-       if (amount == 0) {
-            NBTTagCompound dataMap = ItemDataUtils.getDataMap(itemStack);
-            dataMap.removeTag("energyStored");
-            if (dataMap.isEmpty() && itemStack.getTagCompound()!=null) {
-                itemStack.getTagCompound().removeTag(ItemDataUtils.DATA_ID);
-            }
-        } else {
-            ItemDataUtils.setDouble(itemStack, "energyStored", Math.max(Math.min(amount, getMaxEnergy(itemStack)), 0));
+        if (!(data[0] instanceof ItemStack stack) || !(stack.getItem() instanceof ISustainedTank)) {
+            return false;
         }
+        return GeneratorType.get(stack) == GeneratorType.BIO_GENERATOR;
     }
 
-    @Override
-    public double getMaxEnergy(ItemStack itemStack) {
+    public void setStoredEnergy(ItemStack itemStack, double amount) {
+        if (itemStack.getCount() > 1) {
+            return;
+        }
+        StorageUtils.setStoredEnergy(itemStack, amount, getEnergyCapacity(itemStack));
+    }
+
+    public double getEnergyCapacity(ItemStack itemStack) {
+        if (itemStack.getCount() > 1) {
+            return 0;
+        }
         GeneratorType generatorType = GeneratorType.get(itemStack);
-        return generatorType != null ? generatorType.maxEnergy : 0;
+        return hasEnergyStorage(generatorType) ? generatorType.maxEnergy : 0;
     }
 
-    @Override
-    public double getMaxTransfer(ItemStack itemStack) {
-        return getMaxEnergy(itemStack) * 0.005;
+    public double getEnergyTransfer(ItemStack itemStack) {
+        if (itemStack.getCount() > 1) {
+            return 0;
+        }
+        return getEnergyCapacity(itemStack) * 0.005;
     }
 
-    @Override
-    public boolean canReceive(ItemStack itemStack) {
+    public boolean canReceiveEnergy(ItemStack itemStack) {
         return false;
     }
 
-    @Override
-    public boolean canSend(ItemStack itemStack) {
-        GeneratorType generatorType = GeneratorType.get(itemStack);
-        return generatorType != null && generatorType.maxEnergy != -1;
+    public boolean canSendEnergy(ItemStack itemStack) {
+        return itemStack.getCount() <= 1 && hasEnergyStorage(GeneratorType.get(itemStack));
     }
 
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int receiveEnergy(ItemStack theItem, int energy, boolean simulate) {
-        if (canReceive(theItem)) {
-            double energyNeeded = getMaxEnergy(theItem) - getEnergy(theItem);
-            double toReceive = Math.min(RFIntegration.fromRF(energy), energyNeeded);
-            if (!simulate) {
-                setEnergy(theItem, getEnergy(theItem) + toReceive);
-            }
-            return RFIntegration.toRF(toReceive);
+        if (theItem.getCount() > 1) {
+            return 0;
+        }
+        if (canReceiveEnergy(theItem)) {
+            double amount = RFIntegration.fromRF(energy);
+            double remainder = StorageUtils.insertEnergy(theItem, amount, Action.get(!simulate));
+            return RFIntegration.toRF(amount - remainder);
         }
         return 0;
     }
@@ -313,13 +279,11 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int extractEnergy(ItemStack theItem, int energy, boolean simulate) {
-        if (canSend(theItem)) {
-            double energyRemaining = getEnergy(theItem);
-            double toSend = Math.min(RFIntegration.fromRF(energy), energyRemaining);
-            if (!simulate) {
-                setEnergy(theItem, getEnergy(theItem) - toSend);
-            }
-            return RFIntegration.toRF(toSend);
+        if (theItem.getCount() > 1) {
+            return 0;
+        }
+        if (canSendEnergy(theItem)) {
+            return RFIntegration.toRF(StorageUtils.extractEnergy(theItem, RFIntegration.fromRF(energy), Action.get(!simulate)));
         }
         return 0;
     }
@@ -327,25 +291,31 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getEnergy(theItem));
+        if (theItem.getCount() > 1) {
+            return 0;
+        }
+        return RFIntegration.toRF(StorageUtils.getStoredEnergy(theItem));
     }
 
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getMaxEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getMaxEnergy(theItem));
+        if (theItem.getCount() > 1) {
+            return 0;
+        }
+        return RFIntegration.toRF(getEnergyCapacity(theItem));
     }
 
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public IElectricItemManager getManager(ItemStack itemStack) {
-        return IC2ItemManager.getManager(this);
+        return IC2ItemManager.getManager();
     }
 
     @Override
     public UUID getOwnerUUID(ItemStack stack) {
         if (ItemDataUtils.hasData(stack, "ownerUUID")) {
-            return UUID.fromString(ItemDataUtils.getString(stack, "ownerUUID"));
+            return MekanismUtils.parseUUID(ItemDataUtils.getString(stack, "ownerUUID"));
         }
         return null;
     }
@@ -364,14 +334,14 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
         if (!MekanismConfig.current().general.allowProtection.val()) {
             return SecurityMode.PUBLIC;
         }
-        return SecurityMode.values()[ItemDataUtils.getInt(stack, "security")];
+        return MekanismUtils.getByIndex(SecurityMode.values(), ItemDataUtils.getInt(stack, "security"), SecurityMode.PUBLIC);
     }
 
     @Override
     public void setSecurity(ItemStack stack, SecurityMode mode) {
-        if (getOwnerUUID(stack) == null){
-            ItemDataUtils.removeData(stack,"security");
-        }else {
+        if (getOwnerUUID(stack) == null) {
+            ItemDataUtils.removeData(stack, "security");
+        } else {
             ItemDataUtils.setInt(stack, "security", mode.ordinal());
         }
     }
@@ -389,6 +359,15 @@ public class ItemBlockGenerator extends ItemBlock implements IEnergizedItem, ISp
 
     @Override
     public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
-        return new ItemCapabilityWrapper(stack, new TeslaItemWrapper(), new ForgeEnergyItemWrapper());
+        if (!hasEnergyStorage(GeneratorType.get(stack))) {
+            return null;
+        }
+        return new ItemCapabilityWrapper(stack, new TeslaItemWrapper(), new ForgeEnergyItemWrapper(),
+                RateLimitEnergyHandler.create(() -> getEnergyTransfer(stack), () -> getEnergyCapacity(stack),
+                        ConstantPredicates.alwaysTrue(), ConstantPredicates.alwaysFalse()));
+    }
+
+    private boolean hasEnergyStorage(GeneratorType generatorType) {
+        return generatorType != null && generatorType.maxEnergy >= 0;
     }
 }

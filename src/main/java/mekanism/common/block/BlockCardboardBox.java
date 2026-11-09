@@ -2,14 +2,18 @@ package mekanism.common.block;
 
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismBlocks;
+import mekanism.common.advancements.MekanismCriteriaTriggers;
 import mekanism.common.block.states.BlockStateCardboardBox;
 import mekanism.common.item.ItemBlockCardboardBox;
 import mekanism.common.tile.TileEntityCardboardBox;
+import mekanism.common.util.MekanismPlacementData;
 import net.minecraft.block.Block;
 import net.minecraft.block.material.Material;
 import net.minecraft.block.state.BlockStateContainer;
 import net.minecraft.block.state.IBlockState;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
@@ -90,6 +94,9 @@ public class BlockCardboardBox extends BlockMekanismContainer {
                     data.block.onBlockPlacedBy(world, pos, data.block.getStateFromMeta(data.meta), entityplayer, new ItemStack(data.block, 1, data.meta));
                 }
                 spawnAsEntity(world, pos, new ItemStack(MekanismBlocks.CardboardBox));
+                if (entityplayer instanceof EntityPlayerMP playerMP) {
+                    MekanismCriteriaTriggers.UNBOX_CARDBOARD_BOX.trigger(playerMP);
+                }
             }
         }
         return entityplayer.isSneaking();
@@ -105,6 +112,11 @@ public class BlockCardboardBox extends BlockMekanismContainer {
     @Override
     public TileEntity createNewTileEntity(@Nonnull World world, int meta) {
         return new TileEntityCardboardBox();
+    }
+
+    @Override
+    public void onBlockPlacedBy(World world, BlockPos pos, IBlockState state, EntityLivingBase placer, ItemStack stack) {
+        MekanismPlacementData.apply(world, pos, placer, stack);
     }
 
     @Nonnull

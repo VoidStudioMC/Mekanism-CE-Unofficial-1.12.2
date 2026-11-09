@@ -2,26 +2,32 @@ package mekanism.common.tile;
 
 import io.netty.buffer.ByteBuf;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
-import mekanism.api.Chunk3D;
-import mekanism.api.Coord4D;
-import mekanism.api.EnumColor;
-import mekanism.api.TileNetworkList;
+import mekanism.api.*;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismBlocks;
-import mekanism.common.PacketHandler;
 import mekanism.common.Upgrade;
+import mekanism.common.advancements.MekanismCriteriaTriggers;
 import mekanism.common.base.IComparatorSupport;
-import mekanism.common.base.IMachineSlotTip;
 import mekanism.common.base.IRedstoneControl;
 import mekanism.common.base.IUpgradeTile;
 import mekanism.common.block.states.BlockStateMachine;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
+import mekanism.common.capabilities.Capabilities;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.chunkloading.IChunkLoader;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.content.teleporter.TeleporterFrequency;
 import mekanism.common.frequency.Frequency;
-import mekanism.common.frequency.FrequencyManager;
+import mekanism.common.frequency.Frequency.FrequencyIdentity;
+import mekanism.common.frequency.FrequencyType;
 import mekanism.common.frequency.IFrequencyHandler;
 import mekanism.common.integration.computer.IComputerIntegration;
+import mekanism.common.inventory.container.MekanismContainer;
+import mekanism.common.inventory.container.sync.SyncableBoolean;
+import mekanism.common.inventory.container.sync.SyncableByte;
+import mekanism.common.inventory.container.sync.SyncableInt;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
 import mekanism.common.network.PacketEntityMove.EntityMoveMessage;
 import mekanism.common.network.PacketPortalFX.PortalFXMessage;
 import mekanism.common.security.ISecurityTile;
@@ -29,33 +35,34 @@ import mekanism.common.tile.component.TileComponentChunkLoader;
 import mekanism.common.tile.component.TileComponentSecurity;
 import mekanism.common.tile.component.TileComponentUpgrade;
 import mekanism.common.tile.prefab.TileEntityElectricBlock;
-import mekanism.common.util.ChargeUtils;
 import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.NonNullListSynchronized;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.SoundEvents;
-import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.math.AxisAlignedBB;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 public class TileEntityTeleporter extends TileEntityElectricBlock implements IComputerIntegration, IChunkLoader, IFrequencyHandler, IRedstoneControl, ISecurityTile,
-        IUpgradeTile, IComparatorSupport, IMachineSlotTip {
+        IUpgradeTile, IComparatorSupport, IConfigCardAccess {
 
-    private static final String[] methods = new String[]{"getEnergy", "canTeleport", "getMaxEnergy", "teleport", "setFrequency", "setDefaultColor"};
-    public static List<EnumColor> colors = Arrays.asList(EnumColor.values());
+    private static final String[] methods = new String[]{"getEnergy", "canTeleport", "getMaxEnergy", "teleport", "setFrequency", "createFrequency"};
     public AxisAlignedBB teleportBounds = null;
     public Set<UUID> didTeleport = new ObjectOpenHashSet<>();
 
@@ -65,12 +72,7 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
 
     public boolean prevShouldRender;
 
-    public EnumColor color = EnumColor.PURPLE;
-
-    public Frequency frequency;
-
-    public List<Frequency> publicCache = new ArrayList<>();
-    public List<Frequency> privateCache = new ArrayList<>();
+    public EnumColor color;
 
     /**
      * This teleporter's current status.
@@ -82,15 +84,24 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     public TileComponentSecurity securityComponent;
     public TileComponentChunkLoader chunkLoaderComponent;
     public TileComponentUpgrade upgradeComponent;
+    private EnergyInventorySlot energySlot;
 
     public TileEntityTeleporter() {
         super("Teleporter", MachineType.TELEPORTER.getStorage());
-        inventory = NonNullListSynchronized.withSize(2, ItemStack.EMPTY);
         securityComponent = new TileComponentSecurity(this);
         chunkLoaderComponent = new TileComponentChunkLoader(this);
-        upgradeComponent = new TileComponentUpgrade(this, 1);
-        upgradeComponent.clearSupportedTypes();
-        upgradeComponent.setSupported(Upgrade.ANCHOR);
+        upgradeComponent = new TileComponentUpgrade(this);
+        clearSupportedUpgrades();
+        setSupportedUpgrade(Upgrade.ANCHOR);
+        frequencyComponent.track(FrequencyType.TELEPORTER, true, true, false);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        energySlot = builder.addSlot(EnergyInventorySlot.fillOrConvert(getMainEnergyContainer(), this::getWorld, listener, 153, 7), RelativeSide.values());
+        return builder.build();
     }
 
     public static void teleportPlayerTo(EntityPlayerMP player, Coord4D coord, TileEntityTeleporter teleporter) {
@@ -126,44 +137,15 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
         player.connection.setPlayerLocation(player.posX, player.posY, player.posZ, yaw, player.rotationPitch);
     }
 
-    public static EnumColor increment(EnumColor color) {
-        if (color == null) {
-            return colors.get(0);
-        } else if (colors.indexOf(color) == colors.size() - 1) {
-            return null;
-        }
-        return colors.get(colors.indexOf(color) + 1);
-    }
-
-    public static EnumColor decrement(EnumColor color) {
-        if (color == null) {
-            return colors.get(colors.size() - 1);
-        } else if (colors.indexOf(color) == 0) {
-            return null;
-        }
-        return colors.get(colors.indexOf(color) - 1);
-    }
-
-
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
         if (teleportBounds == null) {
             resetBounds();
         }
-        ChargeUtils.discharge(0, this);
-        FrequencyManager manager = getManager(frequency);
-        if (manager != null) {
-            if (frequency != null && !frequency.valid) {
-                frequency = manager.validateFrequency(getSecurity().getOwnerUUID(), Coord4D.get(this), frequency);
-            }
-            if (frequency != null) {
-                frequency = manager.update(Coord4D.get(this), frequency);
-            }
-        } else {
-            frequency = null;
-        }
+        energySlot.fillContainerOrConvert();
 
+        TeleporterFrequency freq = getFreq();
         status = canTeleport();
         if (MekanismUtils.canFunction(this) && status == 1 && teleDelay == 0) {
             teleport();
@@ -172,11 +154,15 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
             cleanTeleportCache();
         }
 
+        EnumColor prevColor = color;
         shouldRender = status == 1 || status > 4;
+        color = freq == null ? null : freq.getColor();
         if (shouldRender != prevShouldRender) {
             Mekanism.packetHandler.sendUpdatePacket(this);
             //This also means the comparator output changed so notify the neighbors we have a change
             MekanismUtils.notifyLoadedNeighborsOfTileChange(world, Coord4D.get(this));
+        } else if (color != prevColor) {
+            Mekanism.packetHandler.sendUpdatePacket(this);
         }
         prevShouldRender = shouldRender;
         teleDelay = Math.max(0, teleDelay - 1);
@@ -187,75 +173,37 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
         return false;
     }
 
-    @Override
-    public Frequency getFrequency(FrequencyManager manager) {
-        if (manager == Mekanism.securityFrequencies) {
-            return getSecurity().getFrequency();
-        }
-        return frequency;
+    public TeleporterFrequency getFreq() {
+        return getFrequency(FrequencyType.TELEPORTER);
     }
 
     public Coord4D getClosest() {
+        TeleporterFrequency frequency = getFreq();
         if (frequency != null) {
             return frequency.getClosestCoords(Coord4D.get(this));
         }
         return null;
     }
 
-    public void setFrequency(String name, boolean publicFreq) {
-        FrequencyManager manager = getManager(new Frequency(name, null).setPublic(publicFreq));
-        manager.deactivate(Coord4D.get(this));
-        for (Frequency freq : manager.getFrequencies()) {
-            if (freq.name.equals(name)) {
-                frequency = freq;
-                frequency.activeCoords.add(Coord4D.get(this));
-                MekanismUtils.saveChunk(this);
-                return;
-            }
+    public void setFrequency(FrequencyIdentity identity) {
+        UUID owner = getSecurity().getOwnerUUID();
+        if (identity != null && owner != null) {
+            setFrequency(FrequencyType.TELEPORTER, identity, owner);
         }
-        Frequency freq = new Frequency(name, getSecurity().getOwnerUUID()).setPublic(publicFreq);
-        freq.activeCoords.add(Coord4D.get(this));
-        manager.addFrequency(freq);
-        frequency = freq;
-        MekanismUtils.saveChunk(this);
     }
 
-    public FrequencyManager getManager(Frequency freq) {
-        if (getSecurity().getOwnerUUID() == null || freq == null) {
-            return null;
+    public void createFrequency(String name) {
+        UUID owner = getSecurity().getOwnerUUID();
+        if (name != null && !name.isEmpty() && owner != null) {
+            setFrequency(FrequencyType.TELEPORTER, new FrequencyIdentity(name, SecurityMode.PUBLIC, owner), owner);
         }
-        if (freq.isPublic()) {
-            return Mekanism.publicTeleporters;
-        } else if (!Mekanism.privateTeleporters.containsKey(getSecurity().getOwnerUUID())) {
-            FrequencyManager manager = new FrequencyManager(Frequency.class, Frequency.TELEPORTER, getSecurity().getOwnerUUID());
-            Mekanism.privateTeleporters.put(getSecurity().getOwnerUUID(), manager);
-            manager.createOrLoad(world);
-        }
-
-        return Mekanism.privateTeleporters.get(getSecurity().getOwnerUUID());
     }
 
     @Override
     public void onChunkUnload() {
         super.onChunkUnload();
-        if (!isRemote() && frequency != null) {
-            FrequencyManager manager = getManager(frequency);
-            if (manager != null) {
-                manager.deactivate(Coord4D.get(this));
-            }
-        }
-    }
-
-    @Override
-    public void invalidate() {
-        super.invalidate();
         if (!isRemote()) {
-            if (frequency != null) {
-                FrequencyManager manager = getManager(frequency);
-                if (manager != null) {
-                    manager.deactivate(Coord4D.get(this));
-                }
-            }
+            frequencyComponent.invalidate();
         }
     }
 
@@ -267,20 +215,6 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
                 didTeleport.remove(id);
             }
         });
-    }
-
-    @Nonnull
-    @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return new int[]{0};
-    }
-
-    @Override
-    public boolean isItemValidForSlot(int slotID, @Nonnull ItemStack itemstack) {
-        if (slotID == 0) {
-            return ChargeUtils.canBeDischarged(itemstack);
-        }
-        return true;
     }
 
     public void resetBounds() {
@@ -299,11 +233,11 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
         }
         List<Entity> entitiesInPortal = getToTeleport();
         Coord4D closestCoords = getClosest();
-        int electricityNeeded = 0;
+        double electricityNeeded = 0;
         for (Entity entity : entitiesInPortal) {
             electricityNeeded += calculateEnergyCost(entity, closestCoords);
         }
-        if (getEnergy() < electricityNeeded) {
+        if (getMainEnergyContainer().extract(electricityNeeded, Action.SIMULATE, AutomationType.INTERNAL) < electricityNeeded) {
             return 4;
         }
         return 1;
@@ -318,22 +252,31 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
         if (closestCoords == null) {
             return;
         }
+        TeleporterFrequency frequency = getFreq();
+        if (frequency == null) {
+            return;
+        }
         entitiesInPortal.forEach(entity -> {
             World teleWorld = FMLCommonHandler.instance().getMinecraftServerInstance().getWorld(closestCoords.dimensionId);
-            TileEntityTeleporter teleporter = (TileEntityTeleporter) closestCoords.getTileEntity(teleWorld);
-            if (teleporter != null) {
-                teleporter.didTeleport.add(entity.getPersistentID());
-                teleporter.teleDelay = 5;
-                if (entity instanceof EntityPlayerMP mp) {
-                    teleportPlayerTo(mp, closestCoords, teleporter);
-                    alignPlayer(mp, closestCoords);
-                } else {
-                    teleportEntityTo(entity, closestCoords, teleporter);
-                }
-                frequency.activeCoords.forEach(coords -> Mekanism.packetHandler.sendToAllTracking(new PortalFXMessage(coords), coords));
-                setEnergy(getEnergy() - calculateEnergyCost(entity, closestCoords));
-                world.playSound(entity.posX, entity.posY, entity.posZ, SoundEvents.ENTITY_ENDERMEN_TELEPORT, entity.getSoundCategory(), 1.0F, 1.0F, false);
+            if (teleWorld == null) {
+                return;
             }
+            if (!(closestCoords.getTileEntity(teleWorld) instanceof TileEntityTeleporter teleporter)) {
+                return;
+            }
+            teleporter.didTeleport.add(entity.getPersistentID());
+            teleporter.teleDelay = 5;
+            double energyCost = calculateEnergyCost(entity, closestCoords);
+            if (entity instanceof EntityPlayerMP mp) {
+                teleportPlayerTo(mp, closestCoords, teleporter);
+                alignPlayer(mp, closestCoords);
+                MekanismCriteriaTriggers.TELEPORT.trigger(mp);
+            } else {
+                teleportEntityTo(entity, closestCoords, teleporter);
+            }
+            frequency.activeCoords.forEach(coords -> Mekanism.packetHandler.sendToAllTracking(new PortalFXMessage(coords), coords));
+            getMainEnergyContainer().extract(energyCost, Action.EXECUTE, AutomationType.INTERNAL);
+            world.playSound(entity.posX, entity.posY, entity.posZ, SoundEvents.ENTITY_ENDERMEN_TELEPORT, entity.getSoundCategory(), 1.0F, 1.0F, false);
         });
     }
 
@@ -391,12 +334,7 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
-        controlType = RedstoneControl.values()[nbtTags.getInteger("controlType")];
-        color = colors.get(nbtTags.getInteger("color"));
-        if (nbtTags.hasKey("frequency")) {
-            frequency = new Frequency(nbtTags.getCompoundTag("frequency"));
-            frequency.valid = false;
-        }
+        controlType = MekanismUtils.getByIndex(RedstoneControl.values(), nbtTags.getInteger("controlType"), controlType);
     }
 
 
@@ -404,68 +342,18 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     public void writeCustomNBT(NBTTagCompound nbtTags) {
         super.writeCustomNBT(nbtTags);
         nbtTags.setInteger("controlType", controlType.ordinal());
-        nbtTags.setInteger("color", colors.indexOf(color));
-        if (frequency != null) {
-            NBTTagCompound frequencyTag = new NBTTagCompound();
-            frequency.write(frequencyTag);
-            nbtTags.setTag("frequency", frequencyTag);
-
-        }
     }
 
     @Override
     public void handlePacketData(ByteBuf dataStream) {
-        if (FMLCommonHandler.instance().getEffectiveSide().isServer()) {
-            int type = dataStream.readInt();
-            if (type == 0) {
-                String name = PacketHandler.readString(dataStream);
-                boolean isPublic = dataStream.readBoolean();
-                setFrequency(name, isPublic);
-            } else if (type == 1) {
-                String freq = PacketHandler.readString(dataStream);
-                boolean isPublic = dataStream.readBoolean();
-                FrequencyManager manager = getManager(new Frequency(freq, null).setPublic(isPublic));
-                if (manager != null) {
-                    manager.remove(freq, getSecurity().getOwnerUUID());
-                }
-            } else if (type == 2) {
-                int clickType = dataStream.readInt();
-                if (clickType == 0) {
-                    color = increment(color);
-                } else if (clickType == 1) {
-                    color = decrement(color);
-                } else if (clickType == 2) {
-                    color = EnumColor.PURPLE;
-                }
-
-            }
-            return;
-        }
-
         super.handlePacketData(dataStream);
 
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
-            if (dataStream.readBoolean()) {
-                frequency = new Frequency(dataStream);
-            } else {
-                frequency = null;
-            }
-
             status = dataStream.readByte();
             shouldRender = dataStream.readBoolean();
-            controlType = RedstoneControl.values()[dataStream.readInt()];
-            color = EnumColor.values()[dataStream.readInt()];
-            publicCache.clear();
-            privateCache.clear();
-
-            int amount = dataStream.readInt();
-            for (int i = 0; i < amount; i++) {
-                publicCache.add(new Frequency(dataStream));
-            }
-            amount = dataStream.readInt();
-            for (int i = 0; i < amount; i++) {
-                privateCache.add(new Frequency(dataStream));
-            }
+            controlType = MekanismUtils.getByIndex(RedstoneControl.values(), dataStream.readInt(), controlType);
+            int colorIndex = dataStream.readInt();
+            color = colorIndex == -1 ? null : MekanismUtils.getByIndex(EnumColor.values(), colorIndex, color);
         }
     }
 
@@ -473,33 +361,11 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     public TileNetworkList getNetworkedData(TileNetworkList data) {
         super.getNetworkedData(data);
 
-        if (frequency != null) {
-            data.add(true);
-            frequency.write(data);
-        } else {
-            data.add(false);
-        }
-
         data.add(status);
         data.add(shouldRender);
         data.add(controlType.ordinal());
-        data.add(colors.indexOf(color));
-        data.add(Mekanism.publicTeleporters.getFrequencies().size());
-        Mekanism.publicTeleporters.getFrequencies().forEach(freq -> freq.write(data));
-
-        FrequencyManager manager = getManager(new Frequency(null, null).setPublic(false));
-        if (manager != null) {
-            data.add(manager.getFrequencies().size());
-            manager.getFrequencies().forEach(freq-> freq.write(data));
-        } else {
-            data.add(0);
-        }
+        data.add(color == null ? -1 : color.ordinal());
         return data;
-    }
-
-    @Override
-    public boolean canExtractItem(int slotID, @Nonnull ItemStack itemstack, @Nonnull EnumFacing side) {
-        return ChargeUtils.canBeOutputted(itemstack, false);
     }
 
     @Override
@@ -524,13 +390,27 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
                 return new Object[]{"Attempted to teleport."};
             }
             case 4 -> {
-                if (!(arguments[0] instanceof String) || !(arguments[1] instanceof Boolean)) {
+                if (!(arguments[0] instanceof String)) {
                     return new Object[]{"Invalid parameters."};
                 }
                 String freq = ((String) arguments[0]).trim();
-                boolean isPublic = (Boolean) arguments[1];
-                setFrequency(freq, isPublic);
+                Frequency frequency = FrequencyType.TELEPORTER.getManager(null, SecurityMode.PUBLIC).getFrequency(freq);
+                if (frequency == null) {
+                    return new Object[]{"No public teleporter frequency with that name exists."};
+                }
+                setFrequency(frequency.getIdentity());
                 return new Object[]{"Frequency set."};
+            }
+            case 5 -> {
+                if (!(arguments[0] instanceof String)) {
+                    return new Object[]{"Invalid parameters."};
+                }
+                String freq = ((String) arguments[0]).trim();
+                if (FrequencyType.TELEPORTER.getManager(null, SecurityMode.PUBLIC).getFrequency(freq) != null) {
+                    return new Object[]{"Public teleporter frequency already exists."};
+                }
+                createFrequency(freq);
+                return new Object[]{"Frequency created."};
             }
             default -> throw new NoSuchMethodException();
         }
@@ -540,7 +420,17 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     @Override
     @SideOnly(Side.CLIENT)
     public AxisAlignedBB getRenderBoundingBox() {
-        return INFINITE_EXTENT_AABB;
+        return getRenderBoundingBox(getPos());
+    }
+
+    public static AxisAlignedBB getRenderBoundingBox(BlockPos pos) {
+        return new AxisAlignedBB(pos.getX(), pos.getY(), pos.getZ(), pos.getX() + 1D, pos.getY() + 3D, pos.getZ() + 1D);
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public List<Vec3d> computeOcclusionSamplePoints() {
+        return cullingGetAabbOcclusionSamplePoints(getRenderBoundingBox());
     }
 
     @Override
@@ -561,6 +451,14 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     @Override
     public TileComponentSecurity getSecurity() {
         return securityComponent;
+    }
+
+    @Override
+    public void addContainerTrackers(MekanismContainer container) {
+        super.addContainerTrackers(container);
+        container.track(SyncableByte.create(() -> status, value -> status = value));
+        container.track(SyncableBoolean.create(() -> shouldRender, value -> shouldRender = value));
+        container.track(SyncableInt.create(() -> controlType.ordinal(), value -> controlType = MekanismUtils.getByIndex(RedstoneControl.values(), value, controlType)));
     }
 
     @Override
@@ -586,20 +484,27 @@ public class TileEntityTeleporter extends TileEntityElectricBlock implements ICo
     }
 
     @Override
-    public boolean getEnergySlot() {
-        return inventory.get(0).isEmpty();
+    public int getCurrentRedstoneLevel() {
+        return getRedstoneLevel();
     }
 
     @Override
-    public boolean getInputSlot() {
+    public boolean isComparatorInput(mekanism.api.transmitters.TransmissionType type) {
         return false;
     }
 
     @Override
-    public boolean getOuputSlot() {
-        return false;
+    public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing side) {
+        return capability == Capabilities.CONFIG_CARD_CAPABILITY || super.hasCapability(capability, side);
     }
 
+    @Override
+    public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing side) {
+        if (capability == Capabilities.CONFIG_CARD_CAPABILITY) {
+            return Capabilities.CONFIG_CARD_CAPABILITY.cast(this);
+        }
+        return super.getCapability(capability, side);
+    }
 
     @Override
     public int getBlockGuiID(Block block, int metadata) {

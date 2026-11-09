@@ -1,0 +1,24 @@
+{
+  "result": {
+    "item": "mekanism:qio_drive_time_dilating_gas"
+  },
+  "pattern": [
+    "ACA",
+    "CDC",
+    "ACA"
+  ],
+  "type": "mekanism:ore_shaped",
+  "key": {
+    "A": {
+      "ore": "PlutoniumPellet",
+      "type": "forge:ore_dict"
+    },
+    "C": {
+      "item": "mekanism:qio_drive_hyper_dense_gas"
+    },
+    "D": {
+      "ore": "PoloniumPellet",
+      "type": "forge:ore_dict"
+    }
+  }
+}

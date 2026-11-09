@@ -1,16 +1,19 @@
 package mekanism.common.item;
 
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
+import mekanism.api.Action;
 import mekanism.api.Coord4D;
 import mekanism.api.EnumColor;
-import mekanism.api.IHeatTransfer;
 import mekanism.api.MekanismAPI;
+import mekanism.api.heat.IHeatHandler;
 import mekanism.api.transmitters.DynamicNetwork;
 import mekanism.api.transmitters.IGridTransmitter;
 import mekanism.api.transmitters.TransmitterNetworkRegistry;
 import mekanism.common.Mekanism;
 import mekanism.common.capabilities.Capabilities;
 import mekanism.common.util.CapabilityUtils;
+import mekanism.common.util.HeatCapabilityUtils;
+import mekanism.common.util.StorageUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.EnumRarity;
 import net.minecraft.item.ItemStack;
@@ -42,10 +45,11 @@ public class ItemNetworkReader extends ItemEnergized {
         if (!world.isRemote) {
             TileEntity tileEntity = world.getTileEntity(pos);
             boolean drain = !player.capabilities.isCreativeMode;
-            if (getEnergy(stack) >= ENERGY_PER_USE && tileEntity != null) {
+            if (StorageUtils.getStoredEnergy(stack) >= ENERGY_PER_USE && tileEntity != null) {
+                IHeatHandler heatHandler = HeatCapabilityUtils.getHandler(tileEntity, side.getOpposite());
                 if (CapabilityUtils.hasCapability(tileEntity, Capabilities.GRID_TRANSMITTER_CAPABILITY, side.getOpposite())) {
                     if (drain) {
-                        setEnergy(stack, getEnergy(stack) - ENERGY_PER_USE);
+                        StorageUtils.extractFromContainer(stack, ENERGY_PER_USE, Action.EXECUTE);
                     }
                     IGridTransmitter transmitter = CapabilityUtils.getCapability(tileEntity, Capabilities.GRID_TRANSMITTER_CAPABILITY, side.getOpposite());
 
@@ -57,26 +61,24 @@ public class ItemNetworkReader extends ItemEnergized {
                     player.sendMessage(new TextComponentString(EnumColor.GREY + " *Throughput: " + EnumColor.DARK_GREY + transmitter.getTransmitterNetworkFlow()));
                     player.sendMessage(new TextComponentString(EnumColor.GREY + " *Capacity: " + EnumColor.DARK_GREY + transmitter.getTransmitterNetworkCapacity()));
 
-                    if (CapabilityUtils.hasCapability(tileEntity, Capabilities.HEAT_TRANSFER_CAPABILITY, side.getOpposite())) {
-                        IHeatTransfer transfer = CapabilityUtils.getCapability(tileEntity, Capabilities.HEAT_TRANSFER_CAPABILITY, side.getOpposite());
-                        player.sendMessage(new TextComponentString(EnumColor.GREY + " *Temperature: " + EnumColor.DARK_GREY + transfer.getTemp() + "K above ambient"));
+                    if (heatHandler != null) {
+                        player.sendMessage(new TextComponentString(EnumColor.GREY + " *Temperature: " + EnumColor.DARK_GREY + heatHandler.getTotalTemperature() + "K"));
                     }
 
                     player.sendMessage(new TextComponentString(EnumColor.GREY + "------------- " + EnumColor.DARK_BLUE + "[=======]" + EnumColor.GREY + " -------------"));
                     return EnumActionResult.SUCCESS;
-                } else if (CapabilityUtils.hasCapability(tileEntity, Capabilities.HEAT_TRANSFER_CAPABILITY, side.getOpposite())) {
+                } else if (heatHandler != null) {
                     if (drain) {
-                        setEnergy(stack, getEnergy(stack) - ENERGY_PER_USE);
+                        StorageUtils.extractFromContainer(stack, ENERGY_PER_USE, Action.EXECUTE);
                     }
 
-                    IHeatTransfer transfer = CapabilityUtils.getCapability(tileEntity, Capabilities.HEAT_TRANSFER_CAPABILITY, side.getOpposite());
                     player.sendMessage(new TextComponentString(EnumColor.GREY + "------------- " + EnumColor.DARK_BLUE + Mekanism.LOG_TAG + EnumColor.GREY + " -------------"));
-                    player.sendMessage(new TextComponentString(EnumColor.GREY + " *Temperature: " + EnumColor.DARK_GREY + transfer.getTemp() + "K above ambient"));
+                    player.sendMessage(new TextComponentString(EnumColor.GREY + " *Temperature: " + EnumColor.DARK_GREY + heatHandler.getTotalTemperature() + "K"));
                     player.sendMessage(new TextComponentString(EnumColor.GREY + "------------- " + EnumColor.DARK_BLUE + "[=======]" + EnumColor.GREY + " -------------"));
                     return EnumActionResult.SUCCESS;
                 } else {
                     if (drain) {
-                        setEnergy(stack, getEnergy(stack) - ENERGY_PER_USE);
+                        StorageUtils.extractFromContainer(stack, ENERGY_PER_USE, Action.EXECUTE);
                     }
                     Set<DynamicNetwork> iteratedNetworks = new ObjectOpenHashSet<>();
 
@@ -114,7 +116,7 @@ public class ItemNetworkReader extends ItemEnergized {
     }
 
     @Override
-    public boolean canSend(ItemStack itemstack) {
+    public boolean canSendEnergy(ItemStack itemstack) {
         return false;
     }
 }

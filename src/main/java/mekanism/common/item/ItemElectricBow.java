@@ -1,11 +1,13 @@
 package mekanism.common.item;
 
+import mekanism.api.Action;
 import mekanism.api.EnumColor;
 import mekanism.api.NBTConstants;
 import mekanism.common.item.interfaces.IItemHUDProvider;
 import mekanism.common.item.interfaces.IModeItem;
 import mekanism.common.util.ItemDataUtils;
 import mekanism.common.util.LangUtils;
+import mekanism.common.util.StorageUtils;
 import mekanism.common.util.TextComponentGroup;
 import net.minecraft.client.util.ITooltipFlag;
 import net.minecraft.enchantment.EnchantmentHelper;
@@ -43,7 +45,7 @@ public class ItemElectricBow extends ItemEnergized implements IModeItem, IItemHU
             public float apply(ItemStack stack, @Nullable World worldIn, @Nullable EntityLivingBase entityIn) {
                 if (entityIn == null) {
                     return 0.0F;
-                }else {
+                } else {
                     return !(entityIn.getActiveItemStack().getItem() instanceof ItemElectricBow) ? 0.0F : (float) (stack.getMaxItemUseDuration() - entityIn.getItemInUseCount()) / 20.0F;
                 }
             }
@@ -65,7 +67,7 @@ public class ItemElectricBow extends ItemEnergized implements IModeItem, IItemHU
 
     @Override
     public void onPlayerStoppedUsing(ItemStack itemstack, World world, EntityLivingBase entityLiving, int itemUseCount) {
-        if (entityLiving instanceof EntityPlayer player && getEnergy(itemstack) > 0) {
+        if (entityLiving instanceof EntityPlayer player && StorageUtils.getStoredEnergy(itemstack) > 0) {
             boolean flag = player.capabilities.isCreativeMode || EnchantmentHelper.getEnchantmentLevel(Enchantments.INFINITY, itemstack) > 0;
             ItemStack ammo = findAmmo(player);
 
@@ -96,7 +98,7 @@ public class ItemElectricBow extends ItemEnergized implements IModeItem, IItemHU
                         entityarrow.setIsCritical(true);
                     }
                     if (!player.capabilities.isCreativeMode) {
-                        setEnergy(itemstack, getEnergy(itemstack) - (getFireState(itemstack) ? 1200 : 120));
+                        StorageUtils.extractFromContainer(itemstack, getFireState(itemstack) ? 1200 : 120, Action.EXECUTE);
                     }
                     if (noConsume) {
                         entityarrow.pickupStatus = EntityArrow.PickupStatus.CREATIVE_ONLY;
@@ -174,7 +176,7 @@ public class ItemElectricBow extends ItemEnergized implements IModeItem, IItemHU
     }
 
     @Override
-    public boolean canSend(ItemStack itemStack) {
+    public boolean canSendEnergy(ItemStack itemStack) {
         return false;
     }
 
@@ -189,7 +191,7 @@ public class ItemElectricBow extends ItemEnergized implements IModeItem, IItemHU
         if (Math.abs(shift) % 2 == 1) {
             boolean newState = !getFireState(stack);
             setFireState(stack, newState);
-            displayChange.sendMessage(player,()->new TextComponentGroup().translation("mekanism.tooltip.fireMode", LangUtils.onOffColoured(newState)));
+            displayChange.sendMessage(player, () -> new TextComponentGroup().translation("mekanism.tooltip.fireMode", LangUtils.onOffColoured(newState)));
         }
     }
 

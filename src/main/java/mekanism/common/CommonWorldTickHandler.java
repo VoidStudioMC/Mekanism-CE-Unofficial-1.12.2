@@ -2,12 +2,14 @@ package mekanism.common;
 
 import it.unimi.dsi.fastutil.ints.Int2ObjectArrayMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
+import mekanism.common.content.qio.QIOStorageManager;
 import mekanism.common.frequency.FrequencyManager;
+import mekanism.common.inventory.container.PortableQIODashboardContainer;
 import mekanism.common.lib.radiation.RadiationManager;
 import mekanism.common.multiblock.MultiblockManager;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.World;
-import net.minecraft.world.WorldServer;
 import net.minecraft.world.gen.ChunkProviderServer;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
@@ -22,6 +24,7 @@ import java.util.Random;
 public class CommonWorldTickHandler {
 
     private static final long maximumDeltaTimeNanoSecs = 16000000; // 16 milliseconds
+    public static boolean flushTagAndRecipeCaches;
 
     private Int2ObjectMap<Queue<ChunkPos>> chunkRegenMap;
 
@@ -58,20 +61,27 @@ public class CommonWorldTickHandler {
 
     public void tickStart(World world) {
         if (!world.isRemote) {
-            if (!FrequencyManager.loaded) {
+            if (!FrequencyManager.loaded && world.provider.getDimension() == 0) {
                 FrequencyManager.load(world);
-            }
-            if (!RadiationManager.loaded){
-                RadiationManager.INSTANCE.createOrLoad(world);
             }
         }
     }
 
     public void tickEnd(World world) {
         if (!world.isRemote) {
+            QIOStorageManager.tick(world);
             MultiblockManager.tick(world);
-            FrequencyManager.tick(world);
             RadiationManager.INSTANCE.tickServerWorld(world);
+            if (flushTagAndRecipeCaches) {
+                // Item-backed windows do not tick on their own, so refresh
+                // every open portable dashboard before consuming the flag.
+                for (EntityPlayer player : world.playerEntities) {
+                    if (player.openContainer instanceof PortableQIODashboardContainer) {
+                        ((PortableQIODashboardContainer) player.openContainer).getCraftingInventory().invalidateRecipes();
+                    }
+                }
+                flushTagAndRecipeCaches = false;
+            }
             if (chunkRegenMap == null) {
                 return;
             }
@@ -104,25 +114,16 @@ public class CommonWorldTickHandler {
 
     @SubscribeEvent
     public void onTick(TickEvent.ServerTickEvent event) {
+        if (event.side.isServer() && event.phase == Phase.START) RadiationManager.INSTANCE.tickServer();
         if (event.side.isServer() && event.phase == Phase.END) {
             serverTick();
         }
     }
 
     private void serverTick() {
-        RadiationManager.INSTANCE.tickServer();
+        // Frequencies are global to the save, so tick them once per server tick
+        // instead of once for every loaded dimension.
+        FrequencyManager.tickServer();
     }
 
-    @SubscribeEvent
-    public void onTickEnd(WorldTickEvent event) {
-        if (event.side.isServer() && event.phase == Phase.END) {
-            tickEndNew((WorldServer) event.world);
-        }
-    }
-
-    private void tickEndNew(WorldServer world){
-        if (!world.isRemote) {
-            RadiationManager.INSTANCE.tickServerWorld(world);
-        }
-    }
 }

@@ -34,6 +34,7 @@ public abstract class Target<HANDLER, TYPE extends Number & Comparable<TYPE>, EX
     protected Target(Collection<HANDLER> allHandlers) {
         this.handlers = Collections.unmodifiableCollection(allHandlers);
         this.needed = new ArrayList<>(allHandlers.size() / 2);
+        this.handlerCount = allHandlers.size();
     }
 
     protected Target(int expectedSize) {
@@ -48,6 +49,23 @@ public abstract class Target<HANDLER, TYPE extends Number & Comparable<TYPE>, EX
 
     public int getHandlerCount() {
         return handlerCount;
+    }
+
+    /**
+     * Optional direct path. Null preserves the distribution protocol for other target types.
+     */
+    public TYPE sendToSingle(TYPE amount, EXTRA resource) {
+        return null;
+    }
+
+    /**
+     * Clears the transient distribution state while retaining mutable backing-list capacity.
+     * Targets created around an external collection cannot be reset.
+     */
+    public void reset() {
+        handlers.clear();
+        needed.clear();
+        handlerCount = 0;
     }
 
     /**
@@ -71,7 +89,6 @@ public abstract class Target<HANDLER, TYPE extends Number & Comparable<TYPE>, EX
      * @param splitInfo Information about current overall split. The given split will be increased by the actual amount accepted, in case it is less than the offered
      *                  amount.
      * @param amount    Amount to give.
-     *
      * @implNote Must call {@link SplitInfo#send(Number)} with the amount actually accepted.
      */
     protected abstract void acceptAmount(HANDLER handler, SplitInfo<TYPE> splitInfo, TYPE amount);
@@ -81,7 +98,6 @@ public abstract class Target<HANDLER, TYPE extends Number & Comparable<TYPE>, EX
      *
      * @param handler The handler (should correspond with the side we are simulating).
      * @param extra   All the information we are inserting.
-     *
      * @return The amount it was actually willing to accept.
      */
     protected abstract TYPE simulate(HANDLER handler, EXTRA extra);

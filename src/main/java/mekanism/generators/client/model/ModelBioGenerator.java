@@ -59,13 +59,14 @@ public class ModelBioGenerator extends ModelBase {
         setRotation(sideLeft, 0F, 0F, 0F);
     }
 
-    public void doRender(float size){
+    public void doRender(float size) {
         base.render(size);
         sideRight.render(size);
         sideLeft.render(size);
         back.render(size);
         bar.render(size);
     }
+
     public void renderItem(float size) {
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
@@ -90,6 +91,7 @@ public class ModelBioGenerator extends ModelBase {
         glass.render(size);
         GlStateManager.disableBlend();
         GlStateManager.enableAlpha();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
         GlStateManager.popMatrix();
     }
 

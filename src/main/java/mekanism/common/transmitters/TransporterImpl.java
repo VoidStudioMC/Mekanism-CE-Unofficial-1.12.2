@@ -1,23 +1,21 @@
 package mekanism.common.transmitters;
 
 import io.netty.buffer.ByteBuf;
-import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
-import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
-import it.unimi.dsi.fastutil.ints.IntSet;
+import it.unimi.dsi.fastutil.ints.*;
 import mekanism.api.Coord4D;
 import mekanism.api.EnumColor;
 import mekanism.api.TileNetworkList;
 import mekanism.common.Mekanism;
 import mekanism.common.base.ILogisticalTransporter;
 import mekanism.common.capabilities.Capabilities;
-import mekanism.common.content.transporter.TransitRequest;
-import mekanism.common.content.transporter.TransitRequest.TransitResponse;
 import mekanism.common.content.transporter.TransporterManager;
 import mekanism.common.content.transporter.TransporterStack;
 import mekanism.common.content.transporter.TransporterStack.Path;
+import mekanism.common.lib.inventory.IAdvancedTransportEjector;
+import mekanism.common.lib.inventory.TransitRequest;
+import mekanism.common.lib.inventory.TransitRequest.TransitResponse;
 import mekanism.common.network.PacketTileEntity.TileEntityMessage;
-import mekanism.common.tile.TileEntityLogisticalSorter;
+import mekanism.common.tier.TransporterTier;
 import mekanism.common.tile.transmitter.TileEntityLogisticalTransporter;
 import mekanism.common.tile.transmitter.TileEntitySidedPipe.ConnectionType;
 import mekanism.common.transmitters.grid.InventoryNetwork;
@@ -46,6 +44,9 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
     private EnumColor color;
 
     private Int2ObjectMap<TransporterStack> needsSync = new Int2ObjectOpenHashMap<>();
+    private TransporterTier tier = TransporterTier.BASIC;
+    private int delay;
+    private int delayCount;
 
     public TransporterImpl(TileEntityLogisticalTransporter multiPart) {
         super(multiPart);
@@ -53,6 +54,22 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
 
     public Collection<TransporterStack> getTransit() {
         return Collections.unmodifiableCollection(transit.values());
+    }
+
+    public TransporterTier getTier() {
+        return tier;
+    }
+
+    public void setTier(TransporterTier tier) {
+        this.tier = tier;
+    }
+
+    public int getSpeed() {
+        return tier.getSpeed();
+    }
+
+    public int getPullAmount() {
+        return tier.getPullAmount();
     }
 
     public void deleteStack(int id) {
@@ -82,8 +99,11 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
     }
 
     public void readCustomNBT(NBTTagCompound nbtTags) {
+        if (nbtTags.hasKey("tier")) {
+            setTier(MekanismUtils.getByIndex(TransporterTier.values(), nbtTags.getInteger("tier"), tier));
+        }
         if (nbtTags.hasKey("color")) {
-            setColor(TransporterUtils.colors.get(nbtTags.getInteger("color")));
+            setColor(MekanismUtils.getByIndex(TransporterUtils.colors, nbtTags.getInteger("color"), null));
         }
         if (nbtTags.hasKey("stacks")) {
             NBTTagList tagList = nbtTags.getTagList("stacks", NBT.TAG_COMPOUND);
@@ -94,89 +114,126 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
         }
     }
 
+    public void writeCustomNBT(NBTTagCompound nbtTags) {
+        nbtTags.setInteger("tier", tier.ordinal());
+        if (getColor() != null) {
+            nbtTags.setInteger("color", TransporterUtils.colors.indexOf(getColor()));
+        }
+        NBTTagList stacks = new NBTTagList();
+        getTransit().forEach(stack -> {
+            NBTTagCompound tagCompound = new NBTTagCompound();
+            stack.write(tagCompound);
+            stacks.appendTag(tagCompound);
+        });
+        if (stacks.tagCount() != 0) {
+            nbtTags.setTag("stacks", stacks);
+        }
+    }
+
     public void update() {
         if (world().isRemote) {
-            transit.values().forEach(stack -> stack.progress = Math.min(100, stack.progress + getTileEntity().tier.getSpeed()));
+            transit.values().forEach(stack -> stack.progress = Math.min(100, stack.progress + getSpeed()));
         } else if (getTransmitterNetwork() != null) {
-            IntSet deletes = new IntOpenHashSet();
-            getTileEntity().pullItems();
+            IntSet deletes = null;
+            pullItems();
             Coord4D coord = coord();
             for (Entry<Integer, TransporterStack> entry : transit.entrySet()) {
                 int stackId = entry.getKey();
                 TransporterStack stack = entry.getValue();
                 if (!stack.initiatedPath) {
                     if (stack.itemStack.isEmpty() || !recalculate(stackId, stack, null)) {
-                        deletes.add(stackId);
+                        deletes = addDelete(deletes, stackId);
                         continue;
                     }
                 }
 
-                stack.progress += getTileEntity().tier.getSpeed();
+                int prevProgress = stack.progress;
+                stack.progress += getSpeed();
                 if (stack.progress >= 100) {
                     Coord4D prevSet = null;
                     if (stack.hasPath()) {
-                        int currentIndex = stack.getPath().indexOf(coord);
+                        int currentIndex = stack.getPathIndex(coord);
                         if (currentIndex == 0) { //Necessary for transition reasons, not sure why
-                            deletes.add(stackId);
+                            deletes = addDelete(deletes, stackId);
                             continue;
                         }
 
-                        Coord4D next = stack.getPath().get(currentIndex - 1);
-                        if (!stack.isFinal(this)) {
-                            if (next != null) {
+                        if (currentIndex > 0) {
+                            Coord4D next = stack.getPath().get(currentIndex - 1);
+                            if (!stack.isFinal(this)) {
+                                if (next != null) {
+                                    TileEntity tile = next.getTileEntity(world());
+                                    if (stack.canInsertToTransporter(tile, stack.getSide(this))) {
+                                        ILogisticalTransporter nextTile = CapabilityUtils.getCapability(tile, Capabilities.LOGISTICAL_TRANSPORTER_CAPABILITY, null);
+                                        nextTile.entityEntering(stack, stack.progress % 100);
+                                        deletes = addDelete(deletes, stackId);
+                                        continue;
+                                    }
+                                    prevSet = next;
+                                }
+                            } else if (stack.getPathType() != Path.NONE) {
                                 TileEntity tile = next.getTileEntity(world());
-                                if (stack.canInsertToTransporter(tile, stack.getSide(this))) {
-                                    ILogisticalTransporter nextTile = CapabilityUtils.getCapability(tile, Capabilities.LOGISTICAL_TRANSPORTER_CAPABILITY, null);
-                                    nextTile.entityEntering(stack, stack.progress % 100);
-                                    deletes.add(stackId);
-                                    continue;
+                                if (tile != null) {
+                                    TransitResponse response = InventoryUtils.putStackInInventory(tile, TransitRequest.getFromTransport(stack), stack.getSide(this),
+                                            stack.getPathType() == Path.HOME);
+                                    // Nothing was rejected; remove the stack from the prediction tracker and
+                                    // schedule this stack for deletion. Continue the loop thereafter
+                                    ItemStack rejected = response.getRejected(stack.itemStack);
+                                    if (rejected.isEmpty()) {
+                                        TransporterManager.remove(stack);
+                                        deletes = addDelete(deletes, stackId);
+                                        continue;
+                                    }
+                                    // Some portion of the stack got rejected; save the remainder and
+                                    // let the recalculate below sort out what to do next
+                                    stack.itemStack = rejected;
+                                    prevSet = next;
                                 }
-                                prevSet = next;
-                            }
-                        } else if (stack.getPathType() != Path.NONE) {
-                            TileEntity tile = next.getTileEntity(world());
-                            if (tile != null) {
-                                TransitResponse response = InventoryUtils.putStackInInventory(tile, TransitRequest.getFromTransport(stack), stack.getSide(this),
-                                        stack.getPathType() == Path.HOME);
-                                // Nothing was rejected; remove the stack from the prediction tracker and
-                                // schedule this stack for deletion. Continue the loop thereafter
-                                ItemStack rejected = response.getRejected(stack.itemStack);
-                                if (rejected.isEmpty()) {
-                                    TransporterManager.remove(stack);
-                                    deletes.add(stackId);
-                                    continue;
-                                }
-                                // Some portion of the stack got rejected; save the remainder and
-                                // let the recalculate below sort out what to do next
-                                stack.itemStack = rejected;
-                                prevSet = next;
                             }
                         }
                     }
                     if (!recalculate(stackId, stack, prevSet)) {
-                        deletes.add(stackId);
+                        deletes = addDelete(deletes, stackId);
                     } else if (prevSet != null) {
                         stack.progress = 0;
                     } else {
                         stack.progress = 50;
                     }
-                } else if (stack.progress == 50) {
+                } else if (prevProgress < 50 && stack.progress >= 50) {
                     boolean tryRecalculate;
                     if (stack.isFinal(this)) {
                         tryRecalculate = checkPath(stack, Path.DEST, false) || checkPath(stack, Path.HOME, true) || stack.getPathType() == Path.NONE;
                     } else {
-                        tryRecalculate = !stack.canInsertToTransporter(stack.getNext(this).getTileEntity(world()), stack.getSide(this));
+                        Coord4D next = stack.getNext(this);
+                        if (next == null) {
+                            tryRecalculate = true;
+                        } else {
+                            EnumFacing nextSide = stack.getSide(this);
+                            TileEntity nextTile = next.getTileEntity(world());
+                            ILogisticalTransporter nextTransporter = CapabilityUtils.getCapability(nextTile,
+                                    Capabilities.LOGISTICAL_TRANSPORTER_CAPABILITY, nextSide.getOpposite());
+                            if (nextTransporter == null && stack.getPathType() == Path.NONE && stack.getPath().size() == 2) {
+                                // Single-transporter idle paths can point at an inventory. Let the stack
+                                // reach that connection before turning around instead of rerouting at the center.
+                                tryRecalculate = !getTileEntity().getConnectionType(nextSide).canSendTo();
+                            } else {
+                                tryRecalculate = !stack.canInsertToTransporter(nextTile, nextSide);
+                            }
+                        }
                     }
                     if (tryRecalculate && !recalculate(stackId, stack, null)) {
-                        deletes.add(stackId);
+                        deletes = addDelete(deletes, stackId);
                     }
                 }
             }
 
-            if (!deletes.isEmpty() || !needsSync.isEmpty()) {
-                TileEntityMessage msg = new TileEntityMessage(coord, getTileEntity().makeBatchPacket(needsSync, deletes));
+            if (deletes != null || !needsSync.isEmpty()) {
+                IntSet deletedStacks = deletes == null ? IntSets.EMPTY_SET : deletes;
+                TileEntityMessage msg = new TileEntityMessage(coord, getTileEntity().makeBatchPacket(needsSync, deletedStacks));
                 // Now remove any entries from transit that have been deleted
-                deletes.forEach(id -> transit.remove(id));
+                if (deletes != null) {
+                    deletes.forEach(id -> transit.remove(id));
+                }
 
                 // Clear the pending sync packets
                 needsSync.clear();
@@ -188,6 +245,43 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
         }
     }
 
+    private static IntSet addDelete(IntSet deletes, int stackId) {
+        if (deletes == null) {
+            deletes = new IntOpenHashSet();
+        }
+        deletes.add(stackId);
+        return deletes;
+    }
+
+    private void pullItems() {
+        if (delay > 0) {
+            delay--;
+            return;
+        }
+        delay = 3;
+        TileEntityLogisticalTransporter tileEntity = getTileEntity();
+        for (EnumFacing side : EnumFacing.VALUES) {
+            if (tileEntity.getConnectionType(side) != ConnectionType.PULL) {
+                continue;
+            }
+            TileEntity tile = MekanismUtils.getTileEntity(world(), tileEntity.getPos().offset(side));
+            if (tile != null) {
+                TransitRequest request = TransitRequest.buildInventoryMap(tile, side, getPullAmount());
+                if (!request.isEmpty()) {
+                    TransitResponse response = TransporterUtils.insert(tile, this, request, getColor(), true, 0);
+                    if (!response.isEmpty()) {
+                        response.useAll();
+                        delay = 10;
+                        delayCount = 0;
+                    } else {
+                        delayCount++;
+                        delay = Math.min(40, (int) Math.exp(delayCount));
+                    }
+                }
+            }
+        }
+    }
+
     private boolean checkPath(TransporterStack stack, Path dest, boolean home) {
         return stack.getPathType() == dest && (!checkSideForInsert(stack) || !InventoryUtils.canInsert(stack.getDest().getTileEntity(world()), stack.color, stack.itemStack,
                 stack.getSide(this), home));
@@ -195,7 +289,7 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
 
     private boolean checkSideForInsert(TransporterStack stack) {
         EnumFacing side = stack.getSide(this);
-        return getTileEntity().getConnectionType(side) == ConnectionType.NORMAL || getTileEntity().getConnectionType(side) == ConnectionType.PUSH;
+        return getTileEntity().getConnectionType(side).canSendTo();
     }
 
     private boolean recalculate(int stackId, TransporterStack stack, Coord4D from) {
@@ -218,20 +312,48 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
 
     @Override
     public TransitResponse insert(Coord4D original, TransitRequest request, EnumColor color, boolean doEmit, int min) {
-        EnumFacing from = coord().sideDifference(original).getOpposite();
-        TransporterStack stack = new TransporterStack();
-        stack.originalLocation = original;
-        stack.homeLocation = original;
-        stack.color = color;
+        EnumFacing from = coord().sideDifference(original);
+        if (from == null || !canReceiveFrom(null, from.getOpposite())) {
+            return request.getEmptyResponse();
+        }
+        TransporterStack stack = createInsertStack(original, color);
         if (!stack.canInsertToTransporter(this, from)) {
-            return TransitResponse.EMPTY;
+            return request.getEmptyResponse();
         }
         TransitResponse response = stack.recalculatePath(request, this, min);
-        return getTransitResponse(doEmit, stack, response);
+        return updateTransit(doEmit, stack, response);
+    }
+
+    @Override
+    public TransitResponse insertMaybeRR(IAdvancedTransportEjector outputter, Coord4D outputterCoord, TransitRequest request, EnumColor color, boolean doEmit, int min) {
+        if (outputter != null && outputter.getRoundRobin()) {
+            return insert(outputter, outputterCoord, request, color, doEmit, min);
+        }
+        return insert(outputterCoord, request, color, doEmit, min);
+    }
+
+    private TransitResponse insert(IAdvancedTransportEjector outputter, Coord4D outputterCoord, TransitRequest request, EnumColor color, boolean doEmit, int min) {
+        EnumFacing from = coord().sideDifference(outputterCoord);
+        if (from == null || !canReceiveFrom(null, from.getOpposite())) {
+            return request.getEmptyResponse();
+        }
+        TransporterStack stack = createInsertStack(outputterCoord, color);
+        if (!stack.canInsertToTransporter(this, from)) {
+            return request.getEmptyResponse();
+        }
+        TransitResponse response = stack.recalculateRRPath(request, outputter, this, min, doEmit);
+        return updateTransit(doEmit, stack, response);
+    }
+
+    @Override
+    public TransitResponse insertUnchecked(Coord4D outputterCoord, TransitRequest request, EnumColor color, boolean doEmit, int min) {
+        TransporterStack stack = createInsertStack(outputterCoord, color);
+        TransitResponse response = stack.recalculatePath(request, this, min);
+        return updateTransit(doEmit, stack, response);
     }
 
     @Nonnull
-    private TransitResponse getTransitResponse(boolean doEmit, TransporterStack stack, TransitResponse response) {
+    private TransitResponse updateTransit(boolean doEmit, TransporterStack stack, TransitResponse response) {
         if (!response.isEmpty()) {
             stack.itemStack = response.getStack();
             if (doEmit) {
@@ -243,21 +365,16 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
             }
             return response;
         }
-        return TransitResponse.EMPTY;
+        return response;
     }
 
     @Override
-    public TransitResponse insertRR(TileEntityLogisticalSorter outputter, TransitRequest request, EnumColor color, boolean doEmit, int min) {
-        EnumFacing from = coord().sideDifference(Coord4D.get(outputter)).getOpposite();
+    public TransporterStack createInsertStack(Coord4D outputterCoord, EnumColor color) {
         TransporterStack stack = new TransporterStack();
-        stack.originalLocation = Coord4D.get(outputter);
-        stack.homeLocation = Coord4D.get(outputter);
+        stack.originalLocation = outputterCoord;
+        stack.homeLocation = outputterCoord;
         stack.color = color;
-        if (!canReceiveFrom(outputter, from) || !stack.canInsertToTransporter(this, from)) {
-            return TransitResponse.EMPTY;
-        }
-        TransitResponse response = stack.recalculateRRPath(request, outputter, this, min);
-        return getTransitResponse(doEmit, stack, response);
+        return stack;
     }
 
     @Override
@@ -269,6 +386,7 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
         // of bandwidth in a busy server, so by adding to needsSync, the sync will happen
         // in a batch on a per-tick basis.
         int stackId = nextId++;
+        stack.getPathIndex(coord());
         stack.progress = progress;
         transit.put(stackId, stack);
         needsSync.put(stackId, stack);
@@ -294,7 +412,7 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
         if (!getTileEntity().canConnect(side)) {
             return false;
         }
-        return getTileEntity().getConnectionType(side) == ConnectionType.NORMAL || getTileEntity().getConnectionType(side) == ConnectionType.PUSH;
+        return getTileEntity().getConnectionType(side).canSendTo();
     }
 
     @Override
@@ -302,7 +420,7 @@ public class TransporterImpl extends TransmitterImpl<TileEntity, InventoryNetwor
         if (!getTileEntity().canConnect(side)) {
             return false;
         }
-        return getTileEntity().getConnectionType(side) == ConnectionType.NORMAL;
+        return getTileEntity().getConnectionType(side).canAccept();
     }
 
     @Override

@@ -2,8 +2,6 @@ package mekanism.common.tile;
 
 import mekanism.common.tile.prefab.TileEntityEffectsBlock;
 import mekanism.common.util.InventoryUtils;
-import mekanism.common.util.NonNullListSynchronized;
-import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
 import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.items.CapabilityItemHandler;
@@ -13,14 +11,21 @@ import javax.annotation.Nonnull;
 public class TileEntitySuperchargedCoil extends TileEntityEffectsBlock {
 
     public TileEntitySuperchargedCoil() {
-        super("machine.laser", "SuperchargedCoil", 0);
-        inventory = NonNullListSynchronized.withSize(0, ItemStack.EMPTY);
+        super("machine.laser", "SuperchargedCoil", 1_000_000_000D);
+        initializeInventorySlots();
     }
 
+    @Override
+    public void onUpdateServer() {
+        super.onUpdateServer();
+        if (getActive()) {
+            setActive(false);
+        }
+    }
 
     @Override
     public boolean sideIsConsumer(EnumFacing side) {
-        return side == facing.getOpposite();
+        return false;
     }
 
     @Override

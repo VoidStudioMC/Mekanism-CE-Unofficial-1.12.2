@@ -1,0 +1,193 @@
+package mekanism.common.network.qio;
+
+import io.netty.buffer.ByteBuf;
+import mekanism.common.PacketHandler;
+import mekanism.common.content.qio.*;
+import mekanism.common.inventory.container.QIOItemViewerContainer;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
+import net.minecraftforge.fml.common.network.simpleimpl.IMessageHandler;
+import net.minecraftforge.fml.common.network.simpleimpl.MessageContext;
+
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * Legacy viewer sync packet retained for older QIO GUI integrations.
+ */
+public class PacketQIOItemViewerGuiSync implements IMessageHandler<PacketQIOItemViewerGuiSync.Message, IMessage> {
+
+    @Override
+    @Nullable
+    public IMessage onMessage(Message message, MessageContext context) {
+        EntityPlayer player = PacketHandler.getPlayer(context);
+        if (player == null || !player.world.isRemote) {
+            return null;
+        }
+        PacketHandler.handlePacket(() -> {
+            if (player.openContainer instanceof QIOItemViewerContainer) {
+                QIOItemViewerContainer container = (QIOItemViewerContainer) player.openContainer;
+                if (!message.valid || container.windowId != message.windowId) {
+                    return;
+                }
+                if (message.mode == Mode.KILL) {
+                    container.applyKill();
+                } else if (message.mode == Mode.BATCH) {
+                    container.applyBatchChunk(message.entries, message.capacitySummary, true);
+                } else {
+                    container.applyUpdate(message.entries, message.capacitySummary);
+                }
+            }
+        }, player);
+        return null;
+    }
+
+    public static void sendBatch(EntityPlayerMP player, @Nullable QIOFrequency frequency) {
+        if (player == null) {
+            return;
+        }
+        if (frequency == null) {
+            PacketQIOViewerData.sendBatch(player, PacketQIOViewerData.getViewerWindowId(player), Collections.emptyList(), 0, 0);
+        } else {
+            PacketQIOViewerData.sendBatch(player, PacketQIOViewerData.getViewerWindowId(player), frequency.getResourceEntries(),
+                    frequency.getCapacitySummary());
+        }
+    }
+
+    private enum Mode {
+        BATCH,
+        UPDATE,
+        KILL
+    }
+
+    public static class Message implements IMessage {
+        private Mode mode = Mode.KILL;
+        private int windowId = -1;
+        private List<QIOResourceEntry> entries = Collections.emptyList();
+        private QIOCapacitySummary capacitySummary = QIOCapacitySummary.EMPTY;
+        private boolean valid;
+
+        public Message() {
+        }
+
+        private Message(int windowId, Mode mode, List<QIOResourceEntry> entries, long countCapacity, int typeCapacity) {
+            this(windowId, mode, entries, new QIOCapacitySummary(QIOAmount.of(countCapacity), QIOAmount.of(typeCapacity), 0, 0));
+        }
+
+        private Message(int windowId, Mode mode, List<QIOResourceEntry> entries, QIOCapacitySummary capacitySummary) {
+            this.windowId = windowId;
+            this.mode = mode;
+            this.entries = entries == null ? Collections.emptyList() : new ArrayList<>(entries);
+            this.capacitySummary = capacitySummary == null ? QIOCapacitySummary.EMPTY : capacitySummary;
+            valid = windowId >= 0 && mode != null;
+        }
+
+        public static Message batch(int windowId, List<QIOResourceEntry> entries, long countCapacity, int typeCapacity) {
+            return new Message(windowId, Mode.BATCH, entries, countCapacity, typeCapacity);
+        }
+
+        public static Message batch(int windowId, List<QIOResourceEntry> entries, QIOCapacitySummary capacitySummary) {
+            return new Message(windowId, Mode.BATCH, entries, capacitySummary);
+        }
+
+        public static Message update(int windowId, List<QIOResourceEntry> entries, long countCapacity, int typeCapacity) {
+            return new Message(windowId, Mode.UPDATE, entries, countCapacity, typeCapacity);
+        }
+
+        public static Message update(int windowId, List<QIOResourceEntry> entries, QIOCapacitySummary capacitySummary) {
+            return new Message(windowId, Mode.UPDATE, entries, capacitySummary);
+        }
+
+        public static Message kill(int windowId) {
+            return new Message(windowId, Mode.KILL, Collections.emptyList(), 0, 0);
+        }
+
+        @Override
+        public void toBytes(ByteBuf buffer) {
+            int messageStart = buffer.writerIndex();
+            buffer.writeInt(windowId);
+            buffer.writeByte(mode.ordinal());
+            if (mode == Mode.KILL) {
+                return;
+            }
+            capacitySummary.write(buffer);
+            int countIndex = buffer.writerIndex();
+            buffer.writeShort(0);
+            int written = 0;
+            for (int i = 0; i < entries.size() && i < 4096; i++) {
+                int entryStart = buffer.writerIndex();
+                entries.get(i).write(buffer);
+                if (buffer.writerIndex() - messageStart > QIONetworkResourceLimits.MAX_PACKET_BYTES) {
+                    buffer.writerIndex(entryStart);
+                    break;
+                }
+                written++;
+            }
+            buffer.setShort(countIndex, written);
+        }
+
+        @Override
+        public void fromBytes(ByteBuf buffer) {
+            valid = false;
+            windowId = -1;
+            mode = Mode.KILL;
+            entries = Collections.emptyList();
+            try {
+                if (buffer.readableBytes() > QIONetworkResourceLimits.MAX_PACKET_BYTES) {
+                    throw new IllegalArgumentException("Legacy QIO viewer synchronization exceeds the byte limit");
+                }
+                int decodedWindowId = buffer.readInt();
+                int ordinal = buffer.readUnsignedByte();
+                if (decodedWindowId < 0 || ordinal < 0 || ordinal >= Mode.values().length) {
+                    throw new IllegalArgumentException("Invalid legacy QIO viewer synchronization header");
+                }
+                windowId = decodedWindowId;
+                mode = Mode.values()[ordinal];
+                if (mode == Mode.KILL) {
+                    valid = true;
+                    return;
+                }
+                capacitySummary = QIOCapacitySummary.read(buffer);
+                int count = buffer.readUnsignedShort();
+                if (count > PacketQIOViewerData.MAX_ENTRIES) {
+                    throw new IllegalArgumentException("Legacy QIO viewer synchronization exceeds the entry limit");
+                }
+                List<QIOResourceEntry> decoded = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    QIOResourceEntry entry = QIOResourceEntry.read(buffer);
+                    if (entry == null) {
+                        throw new IllegalArgumentException("Invalid legacy QIO viewer resource entry");
+                    }
+                    decoded.add(entry);
+                }
+                entries = decoded;
+                valid = true;
+            } catch (RuntimeException ex) {
+                windowId = -1;
+                mode = Mode.KILL;
+                entries = Collections.emptyList();
+                capacitySummary = QIOCapacitySummary.EMPTY;
+            }
+        }
+
+        public int getWindowId() {
+            return windowId;
+        }
+
+        public boolean isValid() {
+            return valid;
+        }
+    }
+
+    /**
+     * Source-compatible nested packet name.
+     */
+    public static class QIOItemViewerGuiSyncMessage extends Message {
+        public QIOItemViewerGuiSyncMessage() {
+            super();
+        }
+    }
+}

@@ -97,7 +97,7 @@ public class ModelSecurityDesk extends ModelBase {
         setRotation(monitorScreen, -0.4712389F, 0F, 0F);
     }
 
-    public void render(float size, TextureManager manager,boolean isEnableGlow) {
+    public void render(float size, TextureManager manager, boolean isEnableGlow) {
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
         doRender(size);
@@ -116,6 +116,7 @@ public class ModelSecurityDesk extends ModelBase {
             MekanismRenderer.disableGlow(glowInfo);
             GlStateManager.disableBlend();
             GlStateManager.enableAlpha();
+            GlStateManager.shadeModel(GL11.GL_FLAT);
             GlStateManager.popMatrix();
         }
 
@@ -135,6 +136,7 @@ public class ModelSecurityDesk extends ModelBase {
         MekanismRenderer.disableGlow(glowInfo);
         GlStateManager.disableBlend();
         GlStateManager.enableAlpha();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
         GlStateManager.popMatrix();
     }
 

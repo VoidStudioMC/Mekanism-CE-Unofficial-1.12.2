@@ -5,6 +5,7 @@ import mekanism.api.Coord4D;
 import mekanism.api.TileNetworkList;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IRedstoneControl;
+import mekanism.common.capabilities.energy.MachineEnergyContainer;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.integration.computer.IComputerIntegration;
 import mekanism.common.security.ISecurityTile;
@@ -19,7 +20,7 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
 
 import javax.annotation.Nonnull;
 
-public abstract class TileEntityGenerator extends TileEntityEffectsBlock implements IComputerIntegration, IRedstoneControl, ISecurityTile {
+public abstract class TileEntityGenerator extends TileEntityEffectsBlock implements mekanism.common.integration.ic2.IEnergyInIC2OutputWrapper, IComputerIntegration, IRedstoneControl, ISecurityTile {
 
     /**
      * Output per tick this generator can transfer.
@@ -55,14 +56,27 @@ public abstract class TileEntityGenerator extends TileEntityEffectsBlock impleme
                 world.setBlockToAir(getPos());
             }
         }
-        CableUtils.emit(this);
+        if (getEnergy() > 0) {
+            CableUtils.emit(this);
+        }
     }
 
+    @Override
+    protected void onAsyncUpdateSkipped() {
+        // Large generators also emit through their tile sync callback, after all worker updates finish.
+        if (hasTileSyncTask()) {
+            Mekanism.EXECUTE_MANAGER.addSyncTask(this::addTileSyncTask);
+        }
+    }
 
 
     @Override
     public double getMaxOutput() {
         return output;
+    }
+
+    public MachineEnergyContainer getEnergyContainer() {
+        return getMainEnergyContainer();
     }
 
     @Override
@@ -92,7 +106,7 @@ public abstract class TileEntityGenerator extends TileEntityEffectsBlock impleme
         super.handlePacketData(dataStream);
 
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
-            controlType = RedstoneControl.values()[dataStream.readInt()];
+            controlType = MekanismUtils.getByIndex(RedstoneControl.values(), dataStream.readInt(), RedstoneControl.DISABLED);
         }
     }
 
@@ -106,7 +120,7 @@ public abstract class TileEntityGenerator extends TileEntityEffectsBlock impleme
     @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
-        controlType = RedstoneControl.values()[nbtTags.getInteger("controlType")];
+        controlType = MekanismUtils.getByIndex(RedstoneControl.values(), nbtTags.getInteger("controlType"), RedstoneControl.DISABLED);
     }
 
 

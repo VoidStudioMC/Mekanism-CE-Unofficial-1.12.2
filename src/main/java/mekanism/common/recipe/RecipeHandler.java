@@ -2,19 +2,22 @@ package mekanism.common.recipe;
 
 import com.google.common.collect.ImmutableList;
 import mekanism.api.gas.Gas;
+import mekanism.api.gas.GasRegistry;
 import mekanism.api.gas.GasStack;
 import mekanism.api.infuse.InfuseType;
+import mekanism.api.recipes.FarmChanceOutput;
+import mekanism.common.CommonWorldTickHandler;
 import mekanism.common.MekanismFluids;
 import mekanism.common.MekanismItems;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.recipe.inputs.*;
+import mekanism.common.recipe.lookup.cache.InputRecipeCache;
 import mekanism.common.recipe.machines.*;
 import mekanism.common.recipe.outputs.*;
 import mekanism.common.util.StackUtils;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.util.NonNullList;
 import net.minecraftforge.fluids.Fluid;
 import net.minecraftforge.fluids.FluidStack;
 
@@ -23,6 +26,8 @@ import javax.annotation.Nullable;
 import java.lang.reflect.Constructor;
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /**
  * Class used to handle machine recipes. This is used for both adding and fetching recipes.
@@ -30,6 +35,8 @@ import java.util.Map.Entry;
  * @author AidanBrady, unpairedbracket
  */
 public final class RecipeHandler {
+
+    private static volatile int globalRecipeVersion;
 
     public static <INPUT extends MachineInput<INPUT>, OUTPUT extends MachineOutput<OUTPUT>, RECIPE extends MachineRecipe<INPUT, OUTPUT, RECIPE>>
     void addRecipe(@Nonnull Recipe<INPUT, OUTPUT, RECIPE> recipeMap, @Nonnull RECIPE recipe) {
@@ -45,6 +52,15 @@ public final class RecipeHandler {
             }
         });
         toRemove.forEach(iterInput -> recipeMap.get().remove(iterInput));
+    }
+
+    public static void markRecipeCachesInvalid() {
+        globalRecipeVersion++;
+        CommonWorldTickHandler.flushTagAndRecipeCaches = true;
+    }
+
+    public static int getGlobalRecipeVersion() {
+        return globalRecipeVersion;
     }
 
     /**
@@ -166,6 +182,18 @@ public final class RecipeHandler {
         addRecipe(Recipe.ELECTROLYTIC_SEPARATOR, new SeparatorRecipe(fluid, energy, leftOutput, rightOutput));
     }
 
+    public static void addRotaryRecipe(FluidStack fluidInput, GasStack gasInput, GasStack gasOutput, FluidStack fluidOutput) {
+        addRecipe(Recipe.ROTARY_CONDENSENTRATOR, new RotaryRecipe(fluidInput, gasInput, gasOutput, fluidOutput));
+    }
+
+    public static void addDefaultRotaryRecipes() {
+        GasRegistry.getRegisteredGasses().forEach(gas -> {
+            if (gas.hasFluid()) {
+                addRotaryRecipe(new FluidStack(gas.getFluid(), 1), new GasStack(gas, 1), new GasStack(gas, 1), new FluidStack(gas.getFluid(), 1));
+            }
+        });
+    }
+
     /**
      * Add a Precision Sawmill recipe.
      *
@@ -281,6 +309,22 @@ public final class RecipeHandler {
 
     public static void addOrganicFarmRecipe(ItemStack input, Gas gas, ItemStack primaryOutput) {
         addRecipe(Recipe.ORGANIC_FARM, new FarmRecipe(input, gas, primaryOutput));
+    }
+
+    public static void addOrganicFarmRecipe(ItemStack input, Gas gas, ItemStack primaryOutput, List<FarmChanceOutput> chanceOutputs) {
+        addRecipe(Recipe.ORGANIC_FARM, new FarmRecipe(input, new GasStack(gas, 1), primaryOutput, chanceOutputs));
+    }
+
+    public static void addOrganicFarmRecipe(ItemStack input, FluidStack fluid, ItemStack primaryOutput, ItemStack secondaryOutput, double chance) {
+        addRecipe(Recipe.ORGANIC_FARM, new FarmRecipe(new FarmInput(input, fluid), new FarmOutput(primaryOutput, secondaryOutput, chance)));
+    }
+
+    public static void addOrganicFarmRecipe(ItemStack input, FluidStack fluid, ItemStack primaryOutput) {
+        addRecipe(Recipe.ORGANIC_FARM, new FarmRecipe(new FarmInput(input, fluid), new FarmOutput(primaryOutput)));
+    }
+
+    public static void addOrganicFarmRecipe(ItemStack input, FluidStack fluid, ItemStack primaryOutput, List<FarmChanceOutput> chanceOutputs) {
+        addRecipe(Recipe.ORGANIC_FARM, new FarmRecipe(input, fluid, primaryOutput, chanceOutputs));
     }
 
 
@@ -462,7 +506,7 @@ public final class RecipeHandler {
 
 
     @Nullable
-    public static <RECIPE extends FarmMachineRecipe<RECIPE>> RECIPE getFarmRecipe(@Nonnull AdvancedMachineInput input, @Nonnull Map<AdvancedMachineInput, RECIPE> recipes) {
+    public static <RECIPE extends FarmMachineRecipe<RECIPE>> RECIPE getFarmRecipe(@Nonnull FarmInput input, @Nonnull Map<FarmInput, RECIPE> recipes) {
         return getRecipe(input, recipes);
     }
 
@@ -477,6 +521,11 @@ public final class RecipeHandler {
     @Nullable
     public static <INPUT extends MachineInput<INPUT>, RECIPE extends MachineRecipe<INPUT, ?, RECIPE>>
     RECIPE getRecipe(@Nonnull INPUT input, @Nonnull Map<INPUT, RECIPE> recipes) {
+        if (recipes instanceof Recipe.IndexedRecipeMap) {
+            @SuppressWarnings("unchecked")
+            RECIPE indexed = (RECIPE) ((Recipe.IndexedRecipeMap) recipes).findIndexed(input);
+            return indexed;
+        }
         if (input.isValid()) {
             RECIPE recipe = recipes.get(input);
             if (recipe == null && input instanceof IWildInput) {
@@ -492,7 +541,7 @@ public final class RecipeHandler {
     @Nullable
     public static <INPUT extends MachineInput<INPUT>, RECIPE extends MachineRecipe<INPUT, ?, RECIPE>>
     RECIPE getRecipe(@Nonnull INPUT input, @Nonnull Recipe<INPUT, ?, RECIPE> type) {
-        return getRecipe(input, type.get());
+        return type.findRecipe(input);
     }
 
     /**
@@ -504,6 +553,60 @@ public final class RecipeHandler {
     @Nullable
     public static SeparatorRecipe getElectrolyticSeparatorRecipe(@Nonnull FluidInput input) {
         return getRecipe(input, Recipe.ELECTROLYTIC_SEPARATOR);
+    }
+
+    @Nullable
+    public static RotaryRecipe getRotaryRecipe(@Nullable GasStack input) {
+        if (input == null || input.amount <= 0) {
+            return null;
+        }
+        for (RotaryRecipe recipe : Recipe.ROTARY_CONDENSENTRATOR.get().values()) {
+            if (recipe.test(input)) {
+                return recipe.copy();
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    public static RotaryRecipe getRotaryRecipe(@Nullable FluidStack input) {
+        if (input == null || input.amount <= 0) {
+            return null;
+        }
+        for (RotaryRecipe recipe : Recipe.ROTARY_CONDENSENTRATOR.get().values()) {
+            if (recipe.test(input)) {
+                return recipe.copy();
+            }
+        }
+        return null;
+    }
+
+    public static boolean isRotaryGasValid(@Nullable GasStack gas) {
+        if (gas == null || gas.amount <= 0) {
+            return false;
+        }
+        for (RotaryRecipe recipe : Recipe.ROTARY_CONDENSENTRATOR.get().values()) {
+            RotaryInput input = recipe.getInput();
+            RotaryOutput output = recipe.getOutput();
+            if (input.containsType(gas) || output.gasOutput != null && output.gasOutput.isGasEqual(gas)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static boolean isRotaryFluidValid(@Nullable FluidStack fluid) {
+        if (fluid == null || fluid.amount <= 0) {
+            return false;
+        }
+        for (RotaryRecipe recipe : Recipe.ROTARY_CONDENSENTRATOR.get().values()) {
+            RotaryInput input = recipe.getInput();
+            RotaryOutput output = recipe.getOutput();
+            if (input.containsType(fluid) || output.fluidOutput != null && output.fluidOutput.isFluidEqual(fluid)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Nullable
@@ -616,9 +719,7 @@ public final class RecipeHandler {
         if (!itemstack.isEmpty()) {
             for (RECIPE recipe : recipes.values()) {
                 ItemStackInput required = recipe.getInput();
-                NonNullList<ItemStack> list = NonNullList.create();
-                list.add(itemstack);
-                if (required.useItemStackFromInventory(list, 0, false)) {
+                if (MachineInput.inputContains(itemstack, required.ingredient)) {
                     return true;
                 }
             }
@@ -686,6 +787,9 @@ public final class RecipeHandler {
         public static final Recipe<FluidInput, ChemicalPairOutput, SeparatorRecipe> ELECTROLYTIC_SEPARATOR = new Recipe<>(
                 MachineType.ELECTROLYTIC_SEPARATOR, FluidInput.class, ChemicalPairOutput.class, SeparatorRecipe.class);
 
+        public static final Recipe<RotaryInput, RotaryOutput, RotaryRecipe> ROTARY_CONDENSENTRATOR = new Recipe<>(
+                MachineType.ROTARY_CONDENSENTRATOR, RotaryInput.class, RotaryOutput.class, RotaryRecipe.class);
+
         public static final Recipe<ItemStackInput, ChanceOutput, SawmillRecipe> PRECISION_SAWMILL = new Recipe<>(
                 MachineType.PRECISION_SAWMILL, ItemStackInput.class, ChanceOutput.class, SawmillRecipe.class);
 
@@ -725,8 +829,8 @@ public final class RecipeHandler {
         public static final Recipe<ItemStackInput, GasOutput, NutritionalRecipe> NUTRITIONAL_LIQUIFIER = new Recipe<>(
                 MachineType.NUTRITIONAL_LIQUIFIER, ItemStackInput.class, GasOutput.class, NutritionalRecipe.class);
 
-        public static final Recipe<AdvancedMachineInput, ChanceOutput, FarmRecipe> ORGANIC_FARM = new Recipe<>(
-                MachineType.ORGANIC_FARM, AdvancedMachineInput.class, ChanceOutput.class, FarmRecipe.class);
+        public static final Recipe<FarmInput, FarmOutput, FarmRecipe> ORGANIC_FARM = new Recipe<>(
+                MachineType.ORGANIC_FARM, FarmInput.class, FarmOutput.class, FarmRecipe.class);
 
         public static final Recipe<NucleosynthesizerInput, ItemStackOutput, NucleosynthesizerRecipe> ANTIPROTONIC_NUCLEOSYNTHESIZER = new Recipe<>(
                 MachineType.ANTIPROTONIC_NUCLEOSYNTHESIZER, NucleosynthesizerInput.class, ItemStackOutput.class, NucleosynthesizerRecipe.class);
@@ -782,7 +886,8 @@ public final class RecipeHandler {
             return values;
         }
 
-        private final HashMap<INPUT, RECIPE> recipes = new HashMap<>();
+        private final HashMap<INPUT, RECIPE> recipes = new RecipeMap();
+        private final InputRecipeCache<INPUT, RECIPE> inputCache = new InputRecipeCache<>();
         private final String recipeName;
         @Nonnull
         private final String jeiCategory;
@@ -790,6 +895,7 @@ public final class RecipeHandler {
         private Class<INPUT> inputClass;
         private Class<OUTPUT> outputClass;
         private Class<RECIPE> recipeClass;
+        private int recipeVersion;
 
         private Recipe(MachineType type, Class<INPUT> input, Class<OUTPUT> output, Class<RECIPE> recipe) {
             this(type.getBlockName(), input, output, recipe);
@@ -810,8 +916,36 @@ public final class RecipeHandler {
             recipes.put(recipe.getInput(), recipe);
         }
 
+        /**
+         * High-version-style lazy input cache for this recipe category.
+         */
+        @Nullable
+        public RECIPE findRecipe(@Nonnull INPUT input) {
+            return inputCache.findFirstRecipe(input, recipes.values());
+        }
+
+        @Nonnull
+        public List<RECIPE> getCachedRecipes() {
+            return inputCache.getRecipes(recipes.values());
+        }
+
+        @Nonnull
+        public InputRecipeCache<INPUT, RECIPE> getInputCache() {
+            return inputCache;
+        }
+
         public void remove(@Nonnull RECIPE recipe) {
             recipes.remove(recipe.getInput());
+        }
+
+        public int getRecipeVersion() {
+            return recipeVersion;
+        }
+
+        private void onRecipesChanged() {
+            recipeVersion++;
+            inputCache.clear();
+            markRecipeCachesInvalid();
         }
 
         public String getRecipeName() {
@@ -859,6 +993,10 @@ public final class RecipeHandler {
                     if (StackUtils.equalsWildcard(stack, input)) {
                         return true;
                     }
+                } else if (entry.getKey() instanceof FarmInput farmInput) {
+                    if (StackUtils.equalsWildcard(farmInput.itemStack, input)) {
+                        return true;
+                    }
                 } else if (entry.getKey() instanceof FluidInput fluidInput) {
                     if (fluidInput.ingredient.isFluidEqual(input)) {
                         return true;
@@ -884,6 +1022,10 @@ public final class RecipeHandler {
                     if (fluidInput.ingredient.getFluid() == input) {
                         return true;
                     }
+                } else if (entry.getKey() instanceof FarmInput farmInput) {
+                    if (farmInput.isFluidInput() && farmInput.fluidInput.getFluid() == input) {
+                        return true;
+                    }
                 } else if (entry.getKey() instanceof GasAndFluidInput gasAndFluidInput) {
                     if (gasAndFluidInput.ingredientFluid.getFluid() == input) {
                         return true;
@@ -899,6 +1041,10 @@ public final class RecipeHandler {
                 Gas toCheck = null;
                 if (entry.getKey() instanceof GasInput gasInput) {
                     toCheck = gasInput.ingredient.getGas();
+                } else if (entry.getKey() instanceof FarmInput farmInput) {
+                    if (farmInput.isGasInput()) {
+                        toCheck = farmInput.gasInput.getGas();
+                    }
                 } else if (entry.getKey() instanceof AdvancedMachineInput advancedMachineInput) {
                     toCheck = advancedMachineInput.gasType;
                 } else if (entry.getKey() instanceof PressurizedInput pressurizedInput) {
@@ -907,6 +1053,10 @@ public final class RecipeHandler {
                     toCheck = nucleosynthesizerInput.getGas().getGas();
                 } else if (entry.getKey() instanceof GasAndFluidInput gasAndFluidInput) {
                     toCheck = gasAndFluidInput.ingredientGas.getGas();
+                } else if (entry.getKey() instanceof RotaryInput rotaryInput) {
+                    if (rotaryInput.containsType(new GasStack(input, 1))) {
+                        return true;
+                    }
                 }
                 if (toCheck == input) {
                     return true;
@@ -924,6 +1074,337 @@ public final class RecipeHandler {
         @Nonnull
         public HashMap<INPUT, RECIPE> get() {
             return recipes;
+        }
+
+        private interface IndexedRecipeMap {
+            @Nullable
+            MachineRecipe<?, ?, ?> findIndexed(MachineInput<?> input);
+
+            boolean containsIndexed(MachineInput<?> input);
+        }
+
+        private class RecipeMap extends HashMap<INPUT, RECIPE> implements IndexedRecipeMap {
+
+            @Override
+            public MachineRecipe<?, ?, ?> findIndexed(MachineInput<?> input) {
+                @SuppressWarnings("unchecked")
+                INPUT typed = (INPUT) input;
+                return findRecipe(typed);
+            }
+
+            @Override
+            public boolean containsIndexed(MachineInput<?> input) {
+                @SuppressWarnings("unchecked")
+                INPUT typed = (INPUT) input;
+                return inputCache.containsInput(typed, recipes.values());
+            }
+
+            @Override
+            public RECIPE put(INPUT key, RECIPE value) {
+                removeConflictingRotaryRecipes(key);
+                RECIPE previous = super.put(key, value);
+                onRecipesChanged();
+                return previous;
+            }
+
+            private void removeConflictingRotaryRecipes(INPUT key) {
+                if (!(key instanceof RotaryInput rotaryInput)) {
+                    return;
+                }
+                Iterator<Entry<INPUT, RECIPE>> iterator = super.entrySet().iterator();
+                while (iterator.hasNext()) {
+                    Entry<INPUT, RECIPE> entry = iterator.next();
+                    INPUT existingKey = entry.getKey();
+                    if (existingKey != key && !existingKey.equals(key) && conflictsRotaryInput(rotaryInput, existingKey)) {
+                        iterator.remove();
+                    }
+                }
+            }
+
+            private boolean conflictsRotaryInput(RotaryInput input, INPUT existingKey) {
+                if (existingKey instanceof RotaryInput existingInput) {
+                    return input.fluidInput != null && existingInput.fluidInput != null && input.fluidInput.isFluidEqual(existingInput.fluidInput) ||
+                            input.gasInput != null && existingInput.gasInput != null && input.gasInput.isGasEqual(existingInput.gasInput);
+                }
+                return false;
+            }
+
+            @Override
+            public RECIPE computeIfAbsent(INPUT key, Function<? super INPUT, ? extends RECIPE> mappingFunction) {
+                boolean hadValue = containsKey(key) && get(key) != null;
+                RECIPE value = super.computeIfAbsent(key, mappingFunction);
+                if (!hadValue && value != null) {
+                    onRecipesChanged();
+                }
+                return value;
+            }
+
+            @Override
+            public RECIPE computeIfPresent(INPUT key, BiFunction<? super INPUT, ? super RECIPE, ? extends RECIPE> remappingFunction) {
+                if (!containsKey(key) || get(key) == null) {
+                    return super.computeIfPresent(key, remappingFunction);
+                }
+                RECIPE value = super.computeIfPresent(key, remappingFunction);
+                onRecipesChanged();
+                return value;
+            }
+
+            @Override
+            public RECIPE compute(INPUT key, BiFunction<? super INPUT, ? super RECIPE, ? extends RECIPE> remappingFunction) {
+                boolean hadKey = containsKey(key);
+                RECIPE oldValue = get(key);
+                RECIPE value = super.compute(key, remappingFunction);
+                if (hadKey != containsKey(key) || !Objects.equals(oldValue, value)) {
+                    onRecipesChanged();
+                }
+                return value;
+            }
+
+            @Override
+            public RECIPE merge(INPUT key, RECIPE value, BiFunction<? super RECIPE, ? super RECIPE, ? extends RECIPE> remappingFunction) {
+                boolean hadKey = containsKey(key);
+                RECIPE oldValue = get(key);
+                RECIPE result = super.merge(key, value, remappingFunction);
+                if (hadKey != containsKey(key) || !Objects.equals(oldValue, result)) {
+                    onRecipesChanged();
+                }
+                return result;
+            }
+
+            @Override
+            public void replaceAll(BiFunction<? super INPUT, ? super RECIPE, ? extends RECIPE> function) {
+                if (!isEmpty()) {
+                    super.replaceAll(function);
+                    onRecipesChanged();
+                }
+            }
+
+            @Override
+            public void putAll(Map<? extends INPUT, ? extends RECIPE> map) {
+                if (!map.isEmpty()) {
+                    for (Entry<? extends INPUT, ? extends RECIPE> entry : map.entrySet()) {
+                        removeConflictingRotaryRecipes(entry.getKey());
+                        super.put(entry.getKey(), entry.getValue());
+                    }
+                    onRecipesChanged();
+                }
+            }
+
+            @Override
+            public RECIPE remove(Object key) {
+                if (containsKey(key)) {
+                    RECIPE previous = super.remove(key);
+                    onRecipesChanged();
+                    return previous;
+                }
+                return null;
+            }
+
+            @Override
+            public boolean remove(Object key, Object value) {
+                boolean removed = super.remove(key, value);
+                if (removed) {
+                    onRecipesChanged();
+                }
+                return removed;
+            }
+
+            @Override
+            public void clear() {
+                if (!isEmpty()) {
+                    super.clear();
+                    onRecipesChanged();
+                }
+            }
+
+            @Override
+            public RECIPE putIfAbsent(INPUT key, RECIPE value) {
+                boolean hadKey = containsKey(key);
+                RECIPE previous = super.putIfAbsent(key, value);
+                if (!hadKey) {
+                    onRecipesChanged();
+                }
+                return previous;
+            }
+
+            @Override
+            public RECIPE replace(INPUT key, RECIPE value) {
+                if (containsKey(key)) {
+                    RECIPE previous = super.replace(key, value);
+                    onRecipesChanged();
+                    return previous;
+                }
+                return null;
+            }
+
+            @Override
+            public boolean replace(INPUT key, RECIPE oldValue, RECIPE newValue) {
+                boolean replaced = super.replace(key, oldValue, newValue);
+                if (replaced) {
+                    onRecipesChanged();
+                }
+                return replaced;
+            }
+
+            @Override
+            public Set<INPUT> keySet() {
+                Set<INPUT> delegate = super.keySet();
+                return new AbstractSet<>() {
+                    @Override
+                    public Iterator<INPUT> iterator() {
+                        Iterator<INPUT> iterator = delegate.iterator();
+                        return new Iterator<>() {
+                            @Override
+                            public boolean hasNext() {
+                                return iterator.hasNext();
+                            }
+
+                            @Override
+                            public INPUT next() {
+                                return iterator.next();
+                            }
+
+                            @Override
+                            public void remove() {
+                                iterator.remove();
+                                onRecipesChanged();
+                            }
+                        };
+                    }
+
+                    @Override
+                    public int size() {
+                        return delegate.size();
+                    }
+
+                    @Override
+                    public boolean contains(Object object) {
+                        return delegate.contains(object);
+                    }
+
+                    @Override
+                    public boolean remove(Object object) {
+                        return RecipeMap.this.remove(object) != null;
+                    }
+
+                    @Override
+                    public void clear() {
+                        RecipeMap.this.clear();
+                    }
+                };
+            }
+
+            @Override
+            public Collection<RECIPE> values() {
+                Collection<RECIPE> delegate = super.values();
+                return new AbstractCollection<>() {
+                    @Override
+                    public Iterator<RECIPE> iterator() {
+                        Iterator<RECIPE> iterator = delegate.iterator();
+                        return new Iterator<>() {
+                            @Override
+                            public boolean hasNext() {
+                                return iterator.hasNext();
+                            }
+
+                            @Override
+                            public RECIPE next() {
+                                return iterator.next();
+                            }
+
+                            @Override
+                            public void remove() {
+                                iterator.remove();
+                                onRecipesChanged();
+                            }
+                        };
+                    }
+
+                    @Override
+                    public int size() {
+                        return delegate.size();
+                    }
+
+                    @Override
+                    public boolean contains(Object object) {
+                        return delegate.contains(object);
+                    }
+
+                    @Override
+                    public void clear() {
+                        RecipeMap.this.clear();
+                    }
+                };
+            }
+
+            @Override
+            public Set<Entry<INPUT, RECIPE>> entrySet() {
+                Set<Entry<INPUT, RECIPE>> delegate = super.entrySet();
+                return new AbstractSet<>() {
+                    @Override
+                    public Iterator<Entry<INPUT, RECIPE>> iterator() {
+                        Iterator<Entry<INPUT, RECIPE>> iterator = delegate.iterator();
+                        return new Iterator<>() {
+                            @Override
+                            public boolean hasNext() {
+                                return iterator.hasNext();
+                            }
+
+                            @Override
+                            public Entry<INPUT, RECIPE> next() {
+                                Entry<INPUT, RECIPE> entry = iterator.next();
+                                return new Entry<>() {
+                                    @Override
+                                    public INPUT getKey() {
+                                        return entry.getKey();
+                                    }
+
+                                    @Override
+                                    public RECIPE getValue() {
+                                        return entry.getValue();
+                                    }
+
+                                    @Override
+                                    public RECIPE setValue(RECIPE value) {
+                                        RECIPE oldValue = entry.setValue(value);
+                                        onRecipesChanged();
+                                        return oldValue;
+                                    }
+                                };
+                            }
+
+                            @Override
+                            public void remove() {
+                                iterator.remove();
+                                onRecipesChanged();
+                            }
+                        };
+                    }
+
+                    @Override
+                    public int size() {
+                        return delegate.size();
+                    }
+
+                    @Override
+                    public boolean contains(Object object) {
+                        return delegate.contains(object);
+                    }
+
+                    @Override
+                    public boolean remove(Object object) {
+                        if (object instanceof Entry<?, ?> entry) {
+                            return RecipeMap.this.remove(entry.getKey(), entry.getValue());
+                        }
+                        return false;
+                    }
+
+                    @Override
+                    public void clear() {
+                        RecipeMap.this.clear();
+                    }
+                };
+            }
         }
     }
 }

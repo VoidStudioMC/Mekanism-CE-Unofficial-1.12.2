@@ -3,10 +3,12 @@ package mekanism.common.capabilities;
 import mekanism.api.*;
 import mekanism.api.IConfigCardAccess.ISpecialConfigData;
 import mekanism.api.energy.IStrictEnergyAcceptor;
+import mekanism.api.energy.IStrictEnergyHandler;
 import mekanism.api.energy.IStrictEnergyOutputter;
 import mekanism.api.energy.IStrictEnergyStorage;
 import mekanism.api.gas.IGasHandler;
 import mekanism.api.gas.ITubeConnection;
+import mekanism.api.heat.IHeatHandler;
 import mekanism.api.lasers.ILaserDissipation;
 import mekanism.api.lasers.ILaserReceptor;
 import mekanism.api.radiation.capability.IRadiationEntity;
@@ -15,14 +17,19 @@ import mekanism.api.transmitters.IBlockableConnection;
 import mekanism.api.transmitters.IGridTransmitter;
 import mekanism.common.base.ILogisticalTransporter;
 import mekanism.common.base.ITileNetwork;
+import mekanism.common.content.gear.mekafishrod.DefaultMekaFishHook;
+import mekanism.common.content.gear.mekafishrod.IMekaFishHook;
 import mekanism.common.lib.radiation.capability.DefaultRadiationEntity;
 import mekanism.common.lib.radiation.capability.DefaultRadiationShielding;
 import nc.capability.radiation.resistance.IRadiationResistance;
 import net.darkhax.tesla.api.ITeslaConsumer;
 import net.darkhax.tesla.api.ITeslaHolder;
 import net.darkhax.tesla.api.ITeslaProducer;
+import net.minecraft.entity.Entity;
 import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.common.capabilities.CapabilityInject;
+
+import java.util.Optional;
 
 /**
  * Created by ben on 30/04/16.
@@ -31,6 +38,9 @@ public class Capabilities {
 
     @CapabilityInject(IStrictEnergyStorage.class)
     public static Capability<IStrictEnergyStorage> ENERGY_STORAGE_CAPABILITY = null;
+
+    @CapabilityInject(IStrictEnergyHandler.class)
+    public static Capability<IStrictEnergyHandler> STRICT_ENERGY_CAPABILITY = null;
 
     @CapabilityInject(IStrictEnergyAcceptor.class)
     public static Capability<IStrictEnergyAcceptor> ENERGY_ACCEPTOR_CAPABILITY = null;
@@ -45,7 +55,11 @@ public class Capabilities {
     public static Capability<IGasHandler> GAS_HANDLER_CAPABILITY = null;
 
     @CapabilityInject(IHeatTransfer.class)
+    @Deprecated
     public static Capability<IHeatTransfer> HEAT_TRANSFER_CAPABILITY = null;
+
+    @CapabilityInject(IHeatHandler.class)
+    public static Capability<IHeatHandler> HEAT_HANDLER_CAPABILITY = null;
 
     @CapabilityInject(IBlockableConnection.class)
     public static Capability<IBlockableConnection> BLOCKABLE_CONNECTION_CAPABILITY = null;
@@ -102,8 +116,11 @@ public class Capabilities {
     @CapabilityInject(IRadiationResistance.class)
     public static Capability<IRadiationResistance> NC_CAPABILITY_RADIATION_RESISTANCE = null;
 
+    @CapabilityInject(IMekaFishHook.class)
+    public static Capability<IMekaFishHook> MEKA_FISH_HOOK = null;
 
     public static void registerCapabilities() {
+        DefaultStrictEnergyHandler.register();
         DefaultStrictEnergyStorage.register();
         DefaultStrictEnergyAcceptor.register();
         DefaultCableOutputter.register();
@@ -118,14 +135,27 @@ public class Capabilities {
         DefaultConfigurable.register();
         DefaultTileNetwork.register();
         DefaultAlloyInteraction.register();
+        DefaultHeatHandler.register();
         DefaultHeatTransfer.register();
         DefaultConfigCardAccess.register();
         DefaultSpecialConfigData.register();
+        DefaultQIOStorageAccessor.register();
         DefaultEvaporationSolar.register();
         DefaultLaserReceptor.register();
         DefaultLaserDissipation.register();
 
         DefaultRadiationShielding.register();
         DefaultRadiationEntity.register();
+        mekanism.common.lib.radiation.RadiationWorldData.register();
+        mekanism.common.lib.radiation.MeltdownWorldData.register();
+        DefaultMekaFishHook.register();
+    }
+
+    public static Optional<IMekaFishHook> getMekaFishCap(Entity entity) {
+        if (entity.hasCapability(MEKA_FISH_HOOK, null)) {
+            return Optional.ofNullable(entity.getCapability(MEKA_FISH_HOOK, null));
+        } else {
+            return Optional.empty();
+        }
     }
 }

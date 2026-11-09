@@ -17,6 +17,7 @@ import mekanism.common.transmitters.grid.EnergyNetwork;
 import mekanism.common.transmitters.grid.FluidNetwork;
 import mekanism.common.transmitters.grid.GasNetwork;
 import mekanism.common.util.CapabilityUtils;
+import mekanism.common.util.MekanismUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
@@ -74,7 +75,7 @@ public class PacketTransmitterUpdate implements IMessageHandler<TransmitterUpdat
                         if (message.gasType != null) {
                             net.refGas = message.gasType;
                         }
-                        net.buffer = message.gasStack;
+                        net.setBuffer(message.gasStack);
                         net.didTransfer = message.didGasTransfer;
                     }
                 } else if (message.packetType == PacketType.FLUID) {
@@ -83,7 +84,7 @@ public class PacketTransmitterUpdate implements IMessageHandler<TransmitterUpdat
                         if (message.fluidType != null) {
                             net.refFluid = message.fluidType;
                         }
-                        net.buffer = message.fluidStack;
+                        net.setBuffer(message.fluidStack);
                         net.didTransfer = message.didFluidTransfer;
                     }
                 }
@@ -181,7 +182,7 @@ public class PacketTransmitterUpdate implements IMessageHandler<TransmitterUpdat
 
         @Override
         public void fromBytes(ByteBuf dataStream) {
-            packetType = PacketType.values()[dataStream.readInt()];
+            packetType = MekanismUtils.getByIndex(PacketType.values(), dataStream.readInt(), PacketType.UPDATE);
             coord4D = Coord4D.read(dataStream);
             if (packetType == PacketType.UPDATE) {
                 newNetwork = dataStream.readBoolean();

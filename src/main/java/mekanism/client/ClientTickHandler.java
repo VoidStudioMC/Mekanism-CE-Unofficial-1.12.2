@@ -6,9 +6,9 @@ import mekanism.api.IClientTicker;
 import mekanism.api.gear.IModule;
 import mekanism.api.gear.SwiftSneakHelp;
 import mekanism.api.radial.RadialData;
-import mekanism.client.gui.GuiMekanism;
 import mekanism.client.gui.GuiRadialSelector;
-import mekanism.client.gui.IJeiNoShowRecipe;
+import mekanism.client.recipe_viewer.RecipeViewerUtils;
+import mekanism.client.render.RenderTickHandler;
 import mekanism.client.render.hud.MekanismStatusOverlay;
 import mekanism.client.render.lib.ScrollIncrementer;
 import mekanism.client.sound.GeigerSound;
@@ -18,10 +18,12 @@ import mekanism.common.KeySync;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismModules;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.content.boiler.SynchronizedBoilerData;
 import mekanism.common.content.gear.ModuleHelper;
 import mekanism.common.content.gear.mekasuit.ModuleVisionEnhancementUnit;
-import mekanism.common.frequency.Frequency;
-import mekanism.common.item.ItemFlamethrower;
+import mekanism.common.frequency.Frequency.FrequencyIdentity;
+import mekanism.common.interfaces.IOcclusionCulling;
+import mekanism.common.inventory.container.item.ItemStackSlotAccess;
 import mekanism.common.item.armor.ItemMekaSuitBodyArmor;
 import mekanism.common.item.armor.ItemMekaSuitHelmet;
 import mekanism.common.item.armor.ItemMekaSuitPants;
@@ -33,7 +35,6 @@ import mekanism.common.lib.radiation.RadiationManager;
 import mekanism.common.network.PacketModeChange.ModeChangMessage;
 import mekanism.common.network.PacketPortableTeleporter.PortableTeleporterMessage;
 import mekanism.common.network.PacketPortableTeleporter.PortableTeleporterPacketType;
-import mekanism.common.util.LangUtils;
 import mekanism.common.util.MekanismUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GlStateManager;
@@ -44,11 +45,16 @@ import net.minecraft.init.MobEffects;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.potion.PotionEffect;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.EnumParticleTypes;
 import net.minecraft.util.MovementInput;
 import net.minecraft.util.math.MathHelper;
-import net.minecraftforge.client.event.*;
+import net.minecraftforge.client.event.EntityViewRenderEvent;
+import net.minecraftforge.client.event.InputUpdateEvent;
+import net.minecraftforge.client.event.MouseEvent;
+import net.minecraftforge.client.event.RenderPlayerEvent;
+import net.minecraftforge.event.world.ChunkEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent.ClientTickEvent;
@@ -73,6 +79,7 @@ public class ClientTickHandler {
     public static Map<EntityPlayer, TeleportData> portableTeleports = new Object2ObjectOpenHashMap<>();
     private static final ScrollIncrementer scrollIncrementer = new ScrollIncrementer(true);
     public static boolean visionEnhancement = false;
+    private static boolean qioRecipeViewerRefreshPending;
 
     public boolean initHoliday = false;
     public boolean shouldReset = false;
@@ -126,16 +133,24 @@ public class ClientTickHandler {
 
     public static boolean hasFlamethrower(EntityPlayer player) {
         ItemStack currentItem = player.inventory.getCurrentItem();
-        return !currentItem.isEmpty() && currentItem.getItem() instanceof ItemFlamethrower flamethrower && flamethrower.getGas(currentItem) != null;
+        return CommonPlayerTickHandler.hasFlamethrowerGas(currentItem);
     }
 
-    public static void portableTeleport(EntityPlayer player, EnumHand hand, Frequency freq) {
+    public static void portableTeleport(EntityPlayer player, EnumHand hand, FrequencyIdentity identity) {
+        portableTeleport(player, hand, ItemStackSlotAccess.getSlotForHand(player.inventory, hand), identity);
+    }
+
+    public static void portableTeleport(EntityPlayer player, EnumHand hand, int itemSlot, FrequencyIdentity identity) {
         int delay = MekanismConfig.current().general.portableTeleporterDelay.val();
         if (delay == 0) {
-            Mekanism.packetHandler.sendToServer(new PortableTeleporterMessage(PortableTeleporterPacketType.TELEPORT, hand, freq));
+            Mekanism.packetHandler.sendToServer(new PortableTeleporterMessage(PortableTeleporterPacketType.TELEPORT, hand, itemSlot, identity));
         } else {
-            portableTeleports.put(player, new TeleportData(hand, freq, minecraft.world.getTotalWorldTime() + delay));
+            portableTeleports.put(player, new TeleportData(hand, itemSlot, identity, minecraft.world.getTotalWorldTime() + delay));
         }
+    }
+
+    public static void requestQIORecipeViewerRefresh() {
+        qioRecipeViewerRefreshPending = true;
     }
 
     @SubscribeEvent
@@ -147,6 +162,11 @@ public class ClientTickHandler {
 
     public void tickStart() {
         MekanismClient.ticksPassed++;
+
+        if (qioRecipeViewerRefreshPending) {
+            qioRecipeViewerRefreshPending = false;
+            RecipeViewerUtils.refreshRecipeTransferButtons();
+        }
 
         if (!Mekanism.proxy.isPaused()) {
             for (Iterator<IClientTicker> iter = tickingSet.iterator(); iter.hasNext(); ) {
@@ -179,6 +199,7 @@ public class ClientTickHandler {
 
 
             RadiationManager.INSTANCE.tickClient(minecraft.player);
+            RenderTickHandler.tickRadiationOverlay(minecraft.player);
 
 
             UUID playerUUID = minecraft.player.getUniqueID();
@@ -204,7 +225,7 @@ public class ClientTickHandler {
                 }
                 TeleportData data = entry.getValue();
                 if (minecraft.world.getTotalWorldTime() == data.teleportTime) {
-                    Mekanism.packetHandler.sendToServer(new PortableTeleporterMessage(PortableTeleporterPacketType.TELEPORT, data.hand, data.freq));
+                    Mekanism.packetHandler.sendToServer(new PortableTeleporterMessage(PortableTeleporterPacketType.TELEPORT, data.hand, data.itemSlot, data.identity));
                     iter.remove();
                 }
             }
@@ -338,7 +359,7 @@ public class ClientTickHandler {
         setModelVisibility(evt.getEntityPlayer(), evt.getRenderer(), true);
     }
 
-    private static void setModelVisibility(EntityPlayer entity, Render<?> entityModel, boolean showModel) {
+    public static void setModelVisibility(EntityPlayer entity, Render<?> entityModel, boolean showModel) {
         if (entityModel instanceof RenderPlayer renderPlayer) {
             if (entity.getItemStackFromSlot(EntityEquipmentSlot.HEAD).getItem() instanceof ItemMekaSuitHelmet) {
                 renderPlayer.getMainModel().bipedHead.showModel = showModel;
@@ -367,19 +388,37 @@ public class ClientTickHandler {
 
     //Maybe it works
     @SubscribeEvent
+    public void remove(ChunkEvent.Unload event) {
+        if (!event.getWorld().isRemote) {
+            return;
+        }
+        for (TileEntity tile : event.getChunk().getTileEntityMap().values()) {
+            if (tile instanceof IOcclusionCulling culling) {
+                IOcclusionCulling.cullingRemoveClientCacheEntry(culling);
+            }
+        }
+    }
+
+    @SubscribeEvent
     public void remove(WorldEvent.Unload event) {
+        if (event.getWorld().isRemote) {
+            IOcclusionCulling.cullingClearClientCaches();
+            SynchronizedBoilerData.clientHotMap.clear();
+        }
         portableTeleports.remove(minecraft.player);
     }
 
     private static class TeleportData {
 
         private EnumHand hand;
-        private Frequency freq;
+        private int itemSlot;
+        private FrequencyIdentity identity;
         private long teleportTime;
 
-        public TeleportData(EnumHand h, Frequency f, long t) {
+        public TeleportData(EnumHand h, int itemSlot, FrequencyIdentity f, long t) {
             hand = h;
-            freq = f;
+            this.itemSlot = itemSlot;
+            identity = f;
             teleportTime = t;
         }
     }
@@ -412,15 +451,4 @@ public class ClientTickHandler {
         }
     }
 
-    //移除jei的显示配方按钮
-    @SubscribeEvent
-    public void onDrawScreenEventPost(RenderTooltipEvent.Pre event) {
-        if (Mekanism.hooks.JEI && minecraft.currentScreen instanceof GuiMekanism mekanism && mekanism instanceof IJeiNoShowRecipe) {
-            List<String> tip = event.getLines();
-            String jeiShowRecipes = LangUtils.localize("jei.tooltip.show.recipes");
-            if (tip.contains(jeiShowRecipes)) {
-                event.setCanceled(true);
-            }
-        }
-    }
 }

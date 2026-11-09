@@ -1,44 +1,35 @@
 package mekanism.common.item.armor;
 
 
-import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.IGasItem;
 import mekanism.api.gear.IModule;
 import mekanism.api.gear.ModuleData;
 import mekanism.api.mixninapi.ElytraMixinHelp;
-import mekanism.client.gui.element.GuiUtils;
 import mekanism.client.model.mekasuitarmour.ModelMekAsuitBody;
 import mekanism.client.model.mekasuitarmour.ModuleElytra;
 import mekanism.client.model.mekasuitarmour.ModuleGravitational;
 import mekanism.client.model.mekasuitarmour.ModuleJetpack;
-import mekanism.client.render.MekanismRenderer;
 import mekanism.common.MekanismFluids;
 import mekanism.common.MekanismModules;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.content.gear.mekasuit.ModuleJetpackUnit;
 import mekanism.common.interfaces.IOverlayRenderAware;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.item.interfaces.IJetpackItem;
-import mekanism.common.util.ItemDataUtils;
+import mekanism.common.item.interfaces.ILegacyGasItem;
 import mekanism.common.util.LangUtils;
 import net.minecraft.client.model.ModelBiped;
-import net.minecraft.client.renderer.BufferBuilder;
-import net.minecraft.client.renderer.GlStateManager;
-import net.minecraft.client.renderer.Tessellator;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.ItemStack;
-import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.jetbrains.annotations.NotNull;
 
-import javax.annotation.Nonnull;
 import java.util.List;
 
-public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem, IJetpackItem, ElytraMixinHelp, IOverlayRenderAware {
+public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements ILegacyGasItem, IJetpackItem, ElytraMixinHelp, IOverlayRenderAware {
 
     public ItemMekaSuitBodyArmor() {
         super(1, EntityEquipmentSlot.CHEST);
@@ -48,8 +39,8 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
     @SideOnly(Side.CLIENT)
     @Override
     public void addInformation(ItemStack stack, World world, List<String> tooltip) {
-        if (hasModule(stack, MekanismModules.JETPACK_UNIT)) {
-            GasStack gasStack = getGas(stack);
+        if (isModuleEnabled(stack, MekanismModules.JETPACK_UNIT)) {
+            GasStack gasStack = getStoredGas(stack);
             if (gasStack == null) {
                 tooltip.add(LangUtils.localize("tooltip.noGas") + ".");
             } else {
@@ -91,72 +82,69 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
     }
 
 
-    @Override
-    public int getRate(ItemStack itemstack) {
+    private int getJetpackTransferRate(ItemStack itemstack) {
         return MekanismConfig.current().meka.mekaSuitJetpackTransferRate.val();
     }
 
-    @Override
-    public int addGas(ItemStack itemstack, GasStack stack) {
-        if (!hasModule(itemstack, MekanismModules.JETPACK_UNIT)) {
-            return 0;
-        }
-        if (getGas(itemstack) != null && getGas(itemstack).getGas() != stack.getGas()) {
-            return 0;
-        }
-        if (stack.getGas() != MekanismFluids.Hydrogen) {
-            return 0;
-        }
-        int toUse = Math.min(getMaxGas(itemstack) - getStored(itemstack), Math.min(getRate(itemstack), stack.amount));
-        setGas(itemstack, new GasStack(stack.getGas(), getStored(itemstack) + toUse));
-        return toUse;
-    }
-
     public int getStored(ItemStack itemstack) {
-        return getGas(itemstack) != null ? getGas(itemstack).amount : 0;
+        GasStack gas = getStoredGas(itemstack);
+        return gas == null ? 0 : gas.amount;
     }
 
-    @Override
-    public GasStack removeGas(ItemStack itemstack, int amount) {
-        return null;
-    }
-
-    @Override
-    public boolean canReceiveGas(ItemStack itemstack, Gas type) {
-        return type == MekanismFluids.Hydrogen;
-    }
-
-    @Override
-    public boolean canProvideGas(ItemStack itemstack, Gas type) {
-        return false;
-    }
-
-    @Override
-    public GasStack getGas(ItemStack itemstack) {
-        return GasStack.readFromNBT(ItemDataUtils.getCompound(itemstack, "stored"));
-    }
-
-    @Override
-    public void setGas(ItemStack itemstack, GasStack stack) {
-        if (stack == null || stack.amount == 0) {
-            ItemDataUtils.removeData(itemstack, "stored");
-        } else {
-            int amount = Math.max(0, Math.min(stack.amount, getMaxGas(itemstack)));
-            GasStack gasStack = new GasStack(stack.getGas(), amount);
-            ItemDataUtils.setCompound(itemstack, "stored", gasStack.write(new NBTTagCompound()));
+    private GasStack getStoredGas(ItemStack itemstack) {
+        if (!isModuleEnabled(itemstack, MekanismModules.JETPACK_UNIT)) {
+            return null;
         }
+        return GasInventorySlot.getStoredGas(itemstack, null);
+    }
+
+    private void setStoredGas(ItemStack itemstack, GasStack stack) {
+        if (!isModuleEnabled(itemstack, MekanismModules.JETPACK_UNIT)) {
+            return;
+        }
+        if (stack != null && stack.getGas() != null && stack.getGas() != MekanismFluids.Hydrogen) {
+            return;
+        }
+        GasInventorySlot.setStoredGas(itemstack, stack, null, getJetpackGasCapacity(itemstack));
+    }
+
+    private int getJetpackGasCapacity(ItemStack stack) {
+        IModule<ModuleJetpackUnit> module = getModule(stack, MekanismModules.JETPACK_UNIT);
+        return module != null && module.isEnabled() ? MekanismConfig.current().meka.mekaSuitJetpackMaxStorage.val() * module.getInstalledCount() : 0;
     }
 
     @Override
-    public int getMaxGas(ItemStack stack) {
-        IModule<ModuleJetpackUnit> module = getModule(stack, MekanismModules.JETPACK_UNIT);
-        return module != null ? MekanismConfig.current().meka.mekaSuitJetpackMaxStorage.val() * module.getInstalledCount() : 0;
+    protected boolean hasGasCapabilitySupport() {
+        return true;
+    }
+
+    @Override
+    protected boolean isGasCapabilityEnabled(ItemStack stack) {
+        return isModuleEnabled(stack, MekanismModules.JETPACK_UNIT);
+    }
+
+    @Override
+    protected int getGasCapabilityRate(ItemStack stack) {
+        return getJetpackTransferRate(stack);
+    }
+
+    @Override
+    protected int getGasCapabilityCapacity(ItemStack stack) {
+        return getJetpackGasCapacity(stack);
+    }
+
+    @Override
+    protected java.util.function.Predicate<GasStack> getGasCapabilityValidator(ItemStack stack) {
+        return gasStack -> gasStack != null && gasStack.getGas() == MekanismFluids.Hydrogen && isModuleEnabled(stack, MekanismModules.JETPACK_UNIT);
     }
 
 
     @Override
     public boolean canUseJetpack(ItemStack stack) {
-        return armorType == EntityEquipmentSlot.CHEST && isModuleEnabled(stack, MekanismModules.JETPACK_UNIT) ? getStored(stack) > 0 : getModules(stack).stream().allMatch(module -> module.isEnabled() && module.getData().isExclusive(ModuleData.ExclusiveFlag.OVERRIDE_JUMP.getMask()));
+        int stored = getStored(stack);
+        return armorType == EntityEquipmentSlot.CHEST && isModuleEnabled(stack, MekanismModules.JETPACK_UNIT) ?
+                stored > 0 :
+                getModules(stack).stream().allMatch(module -> module.isEnabled() && module.getData().isExclusive(ModuleData.ExclusiveFlag.OVERRIDE_JUMP.getMask()));
     }
 
     @Override
@@ -172,11 +160,7 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
     public void useJetpackFuel(ItemStack stack) {
         IModule<ModuleJetpackUnit> module = getModule(stack, MekanismModules.JETPACK_UNIT);
         if (module != null && module.isEnabled()) {
-            GasStack gas = getGas(stack);
-            if (gas != null) {
-                int amount = ceil(module.getCustomInstance().getThrustMultiplier());
-                setGas(stack, new GasStack(gas.getGas(), gas.amount - amount));
-            }
+            useGas(stack, MekanismFluids.Hydrogen, ceil(module.getCustomInstance().getThrustMultiplier()));
         }
     }
 
@@ -186,13 +170,14 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
         if (module != null && module.isEnabled()) {
             float thrustMultiplier = module.getCustomInstance().getThrustMultiplier();
             int neededGas = ceil(thrustMultiplier);
+            int stored = getStored(stack);
             //Note: We verified we have at least one mB of gas before we get to the point of getting the thrust,
             // so we only need to do extra validation if we need more than a single mB of hydrogen
             if (neededGas > 1) {
-                if (neededGas > getStored(stack)) {
+                if (neededGas > stored) {
                     //If we don't have enough gas stored to go at the set thrust, scale down the thrust
                     // to be whatever gas we have remaining
-                    thrustMultiplier = getStored(stack);
+                    thrustMultiplier = stored;
                 }
             }
             return 0.15 * thrustMultiplier;
@@ -215,7 +200,8 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
                 //If we can use the elytra, check if the jetpack unit is also installed, and if it is,
                 // only mark that we can use the elytra if the jetpack is not set to hover or if it is if it has no hydrogen stored
                 IModule<ModuleJetpackUnit> jetpack = getModule(stack, MekanismModules.JETPACK_UNIT);
-                return jetpack == null || !jetpack.isEnabled() || jetpack.getCustomInstance().getMode() != JetpackMode.HOVER || getGas(stack) == null;
+                return jetpack == null || !jetpack.isEnabled() || jetpack.getCustomInstance().getMode() != JetpackMode.HOVER ||
+                        getContainedGas(stack, MekanismFluids.Hydrogen) == null;
             }
         }
         return false;
@@ -237,42 +223,6 @@ public class ItemMekaSuitBodyArmor extends ItemMekaSuitArmor implements IGasItem
 
     @Override
     public boolean renderItemOverlayIntoGUI(@NotNull ItemStack stack, int xPosition, int yPosition) {
-        if (!stack.isEmpty() && hasModule(stack, MekanismModules.JETPACK_UNIT)) {
-            GlStateManager.disableLighting();
-            GlStateManager.disableDepth();
-            GlStateManager.disableTexture2D();
-            GlStateManager.disableAlpha();
-            GlStateManager.disableBlend();
-            Tessellator tessellator = Tessellator.getInstance();
-            BufferBuilder bufferbuilder = tessellator.getBuffer();
-            double health = getDurabilityForDisplayGas(stack);
-            int rgbfordisplay = getGASRGBDurabilityForDisplay(stack);
-            int i = Math.round(13.0F - (float) health * 13.0F);
-            GuiUtils.draw(bufferbuilder, xPosition + 2, yPosition + 12, 13, 1, 0, 0, 0, 255);
-            GuiUtils.draw(bufferbuilder, xPosition + 2, yPosition + 12, i, 1, rgbfordisplay >> 16 & 255, rgbfordisplay >> 8 & 255, rgbfordisplay & 255, 255);
-            MekanismRenderer.resetColor();
-            GlStateManager.enableBlend();
-            GlStateManager.enableAlpha();
-            GlStateManager.enableTexture2D();
-            GlStateManager.enableLighting();
-            GlStateManager.enableDepth();
-            return true;
-        }
-        return false;
-    }
-
-    private double getDurabilityForDisplayGas(ItemStack stack) {
-        return 1D - ((getGas(stack) != null ? (double) getGas(stack).amount : 0D) / (double) getMaxGas(stack));
-    }
-
-
-    public int getGASRGBDurabilityForDisplay(@Nonnull ItemStack stack) {
-        GasStack gas = getGas(stack);
-        if (gas != null) {
-            MekanismRenderer.color(gas);
-            return gas.getGas().getTint();
-        } else {
-            return MathHelper.hsvToRGB(Math.max(0.0F, (float) (1 - getDurabilityForDisplay(stack))) / 3.0F, 1.0F, 1.0F);
-        }
+        return renderGasCapabilityItemOverlayIntoGUI(stack, xPosition, yPosition);
     }
 }

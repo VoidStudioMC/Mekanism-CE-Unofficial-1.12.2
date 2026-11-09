@@ -19,26 +19,38 @@ import mekanism.common.network.PacketEditFilter.EditFilterMessage;
 import mekanism.common.network.PacketEntityMove.EntityMoveMessage;
 import mekanism.common.network.PacketFlyingSync.FlyingSyncMessage;
 import mekanism.common.network.PacketGearStateUpdate.GearStateUpdateMessage;
+import mekanism.common.network.PacketGuiInteract.GuiInteractMessage;
 import mekanism.common.network.PacketKey.KeyMessage;
+import mekanism.common.network.PacketLightningRender.LightningRenderMessage;
 import mekanism.common.network.PacketLogisticalSorterGui.LogisticalSorterGuiMessage;
+import mekanism.common.network.PacketMekaFishHook.PacketMekaFishHookMessage;
 import mekanism.common.network.PacketModeChange.ModeChangMessage;
 import mekanism.common.network.PacketNewFilter.NewFilterMessage;
-import mekanism.common.network.PacketOredictionificatorGui.OredictionificatorGuiMessage;
 import mekanism.common.network.PacketPlayerData.PlayerDataMessage;
 import mekanism.common.network.PacketPortableTeleporter.PortableTeleporterMessage;
 import mekanism.common.network.PacketPortalFX.PortalFXMessage;
 import mekanism.common.network.PacketRadialModeChange.RadialModeChangeMessage;
 import mekanism.common.network.PacketRedstoneControl.RedstoneControlMessage;
+import mekanism.common.network.PacketRemoveModule.RemoveModuleMessage;
 import mekanism.common.network.PacketRemoveUpgrade.RemoveUpgradeMessage;
 import mekanism.common.network.PacketResetPlayerClient.ResetPlayerClientMessage;
 import mekanism.common.network.PacketRobit.RobitMessage;
 import mekanism.common.network.PacketSecurityMode.SecurityModeMessage;
 import mekanism.common.network.PacketSecurityUpdate.SecurityUpdateMessage;
+import mekanism.common.network.PacketSetFrequencyColor.SetFrequencyColorMessage;
+import mekanism.common.network.PacketSetItemFrequency.SetItemFrequencyMessage;
+import mekanism.common.network.PacketSetTileFrequency.SetTileFrequencyMessage;
 import mekanism.common.network.PacketSimpleGui.SimpleGuiMessage;
 import mekanism.common.network.PacketStepHeightSync.StepHeightSyncMessage;
 import mekanism.common.network.PacketTileEntity.TileEntityMessage;
 import mekanism.common.network.PacketTransmitterUpdate.TransmitterUpdateMessage;
 import mekanism.common.network.PacketUpdateModuleSettings.UpdateModuleSettingsMessage;
+import mekanism.common.network.PacketWindowSelect.WindowSelectMessage;
+import mekanism.common.network.qio.*;
+import mekanism.common.network.to_client.container.PacketUpdateContainer;
+import mekanism.common.network.to_client.container.PacketUpdateContainer.UpdateContainerMessage;
+import mekanism.common.tile.prefab.TileEntityBasicBlock;
+import mekanism.common.util.SecurityUtils;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
@@ -161,6 +173,24 @@ public class PacketHandler {
         Mekanism.proxy.handlePacket(runnable, player);
     }
 
+    public static boolean canAccessTile(EntityPlayer player, TileEntity tileEntity) {
+        return canAccessTile(player, tileEntity, false);
+    }
+
+    public static boolean canAccessTile(EntityPlayer player, TileEntity tileEntity, boolean requireContainerUser) {
+        if (player == null || tileEntity == null || tileEntity.isInvalid() || tileEntity.getWorld() != player.world) {
+            return false;
+        }
+        if (!SecurityUtils.canAccess(player, tileEntity)) {
+            return false;
+        }
+        // Ensure packets cannot modify arbitrary loaded tiles from long distance.
+        if (player.getDistanceSq(tileEntity.getPos()) > 256) {
+            return false;
+        }
+        return !requireContainerUser || !(tileEntity instanceof TileEntityBasicBlock basic) || basic.playersUsing.contains(player);
+    }
+
     public void initialize() {
         netHandler.registerMessage(PacketRobit.class, RobitMessage.class, 0, Side.SERVER);
         netHandler.registerMessage(PacketTransmitterUpdate.class, TransmitterUpdateMessage.class, 1, Side.CLIENT);
@@ -171,14 +201,12 @@ public class PacketHandler {
         netHandler.registerMessage(PacketTileEntity.class, TileEntityMessage.class, 5, Side.SERVER);
         netHandler.registerMessage(PacketPortalFX.class, PortalFXMessage.class, 6, Side.CLIENT);
         netHandler.registerMessage(PacketDataRequest.class, DataRequestMessage.class, 7, Side.SERVER);
-        netHandler.registerMessage(PacketOredictionificatorGui.class, OredictionificatorGuiMessage.class, 8, Side.CLIENT);
-        netHandler.registerMessage(PacketOredictionificatorGui.class, OredictionificatorGuiMessage.class, 8, Side.SERVER);
+        //FREE ID 8
         netHandler.registerMessage(PacketSecurityMode.class, SecurityModeMessage.class, 9, Side.SERVER);
-        netHandler.registerMessage(PacketPortableTeleporter.class, PortableTeleporterMessage.class, 10, Side.CLIENT);
         netHandler.registerMessage(PacketPortableTeleporter.class, PortableTeleporterMessage.class, 10, Side.SERVER);
         netHandler.registerMessage(PacketRemoveUpgrade.class, RemoveUpgradeMessage.class, 11, Side.SERVER);
         netHandler.registerMessage(PacketRedstoneControl.class, RedstoneControlMessage.class, 12, Side.SERVER);
-        //FREE ID 13
+        netHandler.registerMessage(PacketLightningRender.class, LightningRenderMessage.class, 13, Side.CLIENT);
         netHandler.registerMessage(PacketLogisticalSorterGui.class, LogisticalSorterGuiMessage.class, 14, Side.CLIENT);
         netHandler.registerMessage(PacketLogisticalSorterGui.class, LogisticalSorterGuiMessage.class, 14, Side.SERVER);
         netHandler.registerMessage(PacketNewFilter.class, NewFilterMessage.class, 15, Side.SERVER);
@@ -188,14 +216,14 @@ public class PacketHandler {
         netHandler.registerMessage(PacketSimpleGui.class, SimpleGuiMessage.class, 18, Side.SERVER);
         netHandler.registerMessage(PacketDigitalMinerGui.class, DigitalMinerGuiMessage.class, 19, Side.CLIENT);
         netHandler.registerMessage(PacketDigitalMinerGui.class, DigitalMinerGuiMessage.class, 19, Side.SERVER);
-        //FREE ID 20
+        netHandler.registerMessage(PacketUpdateContainer.class, UpdateContainerMessage.class, 20, Side.CLIENT);
         netHandler.registerMessage(PacketKey.class, KeyMessage.class, 21, Side.SERVER);
-        //FREE ID 22
+        netHandler.registerMessage(PacketSetTileFrequency.class, SetTileFrequencyMessage.class, 22, Side.SERVER);
         netHandler.registerMessage(PacketConfigSync.class, ConfigSyncMessage.class, 23, Side.CLIENT);
         netHandler.registerMessage(PacketBoxBlacklist.class, BoxBlacklistMessage.class, 24, Side.CLIENT);
-        //FREE ID 25
+        netHandler.registerMessage(PacketSetItemFrequency.class, SetItemFrequencyMessage.class, 25, Side.SERVER);
         netHandler.registerMessage(PacketContainerEditMode.class, ContainerEditModeMessage.class, 26, Side.SERVER);
-        //FREE ID 27
+        netHandler.registerMessage(PacketSetFrequencyColor.class, SetFrequencyColorMessage.class, 27, Side.SERVER);
         netHandler.registerMessage(PacketDropperUse.class, DropperUseMessage.class, 28, Side.SERVER);
         netHandler.registerMessage(PacketEntityMove.class, EntityMoveMessage.class, 29, Side.CLIENT);
         netHandler.registerMessage(PacketSecurityUpdate.class, SecurityUpdateMessage.class, 30, Side.CLIENT);
@@ -215,11 +243,22 @@ public class PacketHandler {
         }
         netHandler.registerMessage(PacketUpdateModuleSettings.class, UpdateModuleSettingsMessage.class, 42, Side.CLIENT);
         netHandler.registerMessage(PacketUpdateModuleSettings.class, UpdateModuleSettingsMessage.class, 42, Side.SERVER);
-        // netHandler.registerMessage(PacketRemoveModule.class, RemoveModuleMessage.class, 43, Side.SERVER);
+        netHandler.registerMessage(PacketRemoveModule.class, RemoveModuleMessage.class, 43, Side.SERVER);
         netHandler.registerMessage(PacketShowModeChange.class, PacketShowModeChange.ShowModeChangeMessage.class, 44, Side.CLIENT);
         netHandler.registerMessage(PacketOpenGui.class, PacketOpenGui.OpenGui.class, 45, Side.CLIENT);
         netHandler.registerMessage(PacketOpenGui.class, PacketOpenGui.OpenGui.class, 45, Side.SERVER);
         netHandler.registerMessage(PacketRadiationData.class, PacketRadiationData.PacketRadiationDataMessage.class, 46, Side.CLIENT);
+        netHandler.registerMessage(PacketMekaFishHook.class, PacketMekaFishHookMessage.class, 47, Side.CLIENT);
+        netHandler.registerMessage(PacketWindowSelect.class, WindowSelectMessage.class, 48, Side.SERVER);
+        netHandler.registerMessage(PacketGuiInteract.class, GuiInteractMessage.class, 49, Side.SERVER);
+        netHandler.registerMessage(PacketQIOViewerData.class, PacketQIOViewerData.Message.class, 50, Side.CLIENT);
+        netHandler.registerMessage(PacketQIOViewerAction.class, PacketQIOViewerAction.Message.class, 51, Side.SERVER);
+        netHandler.registerMessage(PacketQIOComponentConfig.class, PacketQIOComponentConfig.Message.class, 52, Side.SERVER);
+        netHandler.registerMessage(PacketQIOPortableGui.class, PacketQIOPortableGui.Message.class, 53, Side.SERVER);
+        netHandler.registerMessage(PacketQIOItemViewerSlotInteract.class, PacketQIOItemViewerSlotInteract.Message.class, 54, Side.SERVER);
+        netHandler.registerMessage(PacketQIOItemViewerGuiSync.class, PacketQIOItemViewerGuiSync.Message.class, 55, Side.CLIENT);
+        netHandler.registerMessage(PacketQIOClearCraftingWindow.class, PacketQIOClearCraftingWindow.Message.class, 56, Side.SERVER);
+        netHandler.registerMessage(PacketQIOFillCraftingWindow.class, PacketQIOFillCraftingWindow.Message.class, 57, Side.SERVER);
     }
 
     @Optional.Method(modid = MekanismHooks.Baubles_MOD_ID)
@@ -294,6 +333,18 @@ public class PacketHandler {
     }
 
     public <TILE extends TileEntity & ITileNetwork> void sendUpdatePacket(TILE tile) {
+        MinecraftServer server = FMLCommonHandler.instance().getMinecraftServerInstance();
+        if (server != null && !server.isCallingFromMinecraftThread()) {
+            Mekanism.EXECUTE_MANAGER.addSyncTask(() -> sendUpdatePacketNow(tile));
+            return;
+        }
+        sendUpdatePacketNow(tile);
+    }
+
+    private <TILE extends TileEntity & ITileNetwork> void sendUpdatePacketNow(TILE tile) {
+        if (tile == null || tile.isInvalid() || tile.getWorld() == null || tile.getWorld().isRemote) {
+            return;
+        }
         sendToAllTracking(new TileEntityMessage(tile), tile);
     }
 

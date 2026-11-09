@@ -35,15 +35,20 @@ public abstract class TileEntityMachine extends TileEntityEffectsBlock implement
      */
     private RedstoneControl controlType = RedstoneControl.DISABLED;
 
-    public TileEntityMachine(String sound, String name, double energyStorge,double energUsage,int upgradeSlot) {
+    public TileEntityMachine(String sound, String name, double energyStorge, double energUsage, int upgradeSlot) {
         super(sound, name, energyStorge);
         energyPerTick = BASE_ENERGY_PER_TICK = energUsage;
-        upgradeComponent = new TileComponentUpgrade(this, upgradeSlot);
-        upgradeComponent.setSupported(Upgrade.MUFFLING);
+        upgradeComponent = new TileComponentUpgrade(this);
+        setSupportedUpgrade(Upgrade.MUFFLING);
     }
 
     public TileEntityMachine(String sound, MachineType type, int upgradeSlot) {
-        this(sound, type.getBlockName(), type.getStorage(),type.getUsage(),upgradeSlot);
+        this(sound, type.getBlockName(), type.getStorage(), type.getUsage(), upgradeSlot);
+    }
+
+    @Override
+    protected double getMainEnergyPerTick() {
+        return energyPerTick;
     }
 
     @Override
@@ -65,7 +70,7 @@ public abstract class TileEntityMachine extends TileEntityEffectsBlock implement
     public void handlePacketData(ByteBuf dataStream) {
         super.handlePacketData(dataStream);
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
-            controlType = RedstoneControl.values()[dataStream.readInt()];
+            controlType = MekanismUtils.getByIndex(RedstoneControl.values(), dataStream.readInt(), controlType);
             energyPerTick = dataStream.readDouble();
             maxEnergy = dataStream.readDouble();
         }
@@ -83,7 +88,7 @@ public abstract class TileEntityMachine extends TileEntityEffectsBlock implement
     @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
-        controlType = RedstoneControl.values()[nbtTags.getInteger("controlType")];
+        controlType = MekanismUtils.getByIndex(RedstoneControl.values(), nbtTags.getInteger("controlType"), controlType);
     }
 
 

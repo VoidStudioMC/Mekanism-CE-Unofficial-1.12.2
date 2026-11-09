@@ -153,6 +153,7 @@ public abstract class TileEntityEffectsBlock extends TileEntityElectricBlock imp
         boolean stateChange = isActive != active;
         if (stateChange) {
             isActive = active;
+            if (hasEnabledComparator()) updateComparatorOutputLevelSync();
             Mekanism.packetHandler.sendUpdatePacket(this);
         }
     }
@@ -210,7 +211,8 @@ public abstract class TileEntityEffectsBlock extends TileEntityElectricBlock imp
             return false;
         }
         if (tile.supportsUpgrade(Upgrade.MUFFLING)) {
-            return tile.getComponent().getUpgrades(Upgrade.MUFFLING) == Upgrade.MUFFLING.getMaxInstalled();
+            int maxInstalled = Upgrade.MUFFLING.getMaxInstalled();
+            return maxInstalled > 0 && tile.getInstalledUpgrades(Upgrade.MUFFLING) >= maxInstalled;
         }
         return false;
     }

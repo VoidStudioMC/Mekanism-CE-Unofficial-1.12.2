@@ -1,0 +1,23 @@
+{
+  "result": {
+    "item": "mekanism:qio_drive_hyper_dense_item"
+  },
+  "pattern": [
+    "ACA",
+    "CDC",
+    "ACA"
+  ],
+  "type": "mekanism:ore_shaped",
+  "key": {
+    "A": {
+      "ore": "PlutoniumPellet",
+      "type": "forge:ore_dict"
+    },
+    "C": {
+      "item": "mekanism:qio_drive_base_item"
+    },
+    "D": {
+      "item": "mekanism:teleportationcore"
+    }
+  }
+}

@@ -2,6 +2,7 @@ package mekanism.common.content.boiler;
 
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import mekanism.api.Coord4D;
+import mekanism.api.heat.HeatAPI;
 import mekanism.common.Mekanism;
 import mekanism.common.block.states.BlockStateBasic.BasicBlockType;
 import mekanism.common.content.tank.SynchronizedTankData.ValveData;
@@ -161,48 +162,55 @@ public class BoilerUpdateProtocol extends UpdateProtocol<SynchronizedBoilerData>
     protected void mergeCaches(List<ItemStack> rejectedItems, MultiblockCache<SynchronizedBoilerData> cache, MultiblockCache<SynchronizedBoilerData> merge) {
         BoilerCache boilerCache = (BoilerCache) cache;
         BoilerCache mergeCache = (BoilerCache) merge;
-        if (boilerCache.water == null) {
-            boilerCache.water = mergeCache.water;
-        } else if (mergeCache.water != null && boilerCache.water.isFluidEqual(mergeCache.water)) {
-            boilerCache.water.amount += mergeCache.water.amount;
-        }
+        boilerCache.water = mergeFluidStack(boilerCache.water, mergeCache.water);
+        boilerCache.steam = mergeFluidStack(boilerCache.steam, mergeCache.steam);
+        boilerCache.input = mergeGasStack(boilerCache.input, mergeCache.input);
+        boilerCache.output = mergeGasStack(boilerCache.output, mergeCache.output);
 
-        if (boilerCache.steam == null) {
-            boilerCache.steam = mergeCache.steam;
-        } else if (mergeCache.steam != null && boilerCache.steam.isFluidEqual(mergeCache.steam)) {
-            boilerCache.steam.amount += mergeCache.steam.amount;
+        if (mergeCache.storedHeat >= 0 && HeatAPI.isFinite(mergeCache.storedHeat)) {
+            if (boilerCache.storedHeat < 0 || !HeatAPI.isFinite(boilerCache.storedHeat)) {
+                boilerCache.storedHeat = mergeCache.storedHeat;
+            } else {
+                boilerCache.storedHeat = HeatAPI.addHeatClamped(boilerCache.storedHeat, mergeCache.storedHeat);
+            }
         }
-
-        if (boilerCache.input == null){
-            boilerCache.input = mergeCache.input;
-        }else if (mergeCache.input != null && boilerCache.input.isGasEqual(mergeCache.input)) {
-            boilerCache.input.amount += mergeCache.input.amount;
+        if (mergeCache.heatCapacity >= 1 && HeatAPI.isFinite(mergeCache.heatCapacity)) {
+            if (boilerCache.heatCapacity < 1 || !HeatAPI.isFinite(boilerCache.heatCapacity)) {
+                boilerCache.heatCapacity = mergeCache.heatCapacity;
+            } else {
+                double mergedCapacity = boilerCache.heatCapacity + mergeCache.heatCapacity;
+                boilerCache.heatCapacity = HeatAPI.isFinite(mergedCapacity) ? HeatAPI.sanitizeHeatCapacity(mergedCapacity) : HeatAPI.MAX_HEAT;
+            }
         }
-
-        if (boilerCache.output == null){
-            boilerCache.output = mergeCache.output;
-        }else if (mergeCache.output != null && boilerCache.output.isGasEqual(mergeCache.output)) {
-            boilerCache.output.amount += mergeCache.output.amount;
-        }
-
-        boilerCache.temperature = Math.max(boilerCache.temperature, mergeCache.temperature);
     }
 
     @Override
     protected void onFormed() {
+        structureFound.updateAmbientTemperature(pointer.getWorld());
+        structureFound.updateHeatCapacity();
+        structureFound.clampStoredSubstancesToCapacity();
+        boolean hot = HeatAPI.isFinite(structureFound.getTemperature()) &&
+                structureFound.getTemperature() >= SynchronizedBoilerData.BASE_BOIL_TEMP - 0.01F;
+        structureFound.clientHot = hot;
+        if (structureFound.inventoryID != null) {
+            SynchronizedBoilerData.hotMap.put(structureFound.inventoryID, hot);
+        }
+        //Publish the hot state before assigning the UUID to internal elements so their blockstate
+        //is correct immediately after a hot boiler reforms.
         super.onFormed();
-        if (structureFound.waterStored != null) {
-            structureFound.waterStored.amount = Math.min(structureFound.waterStored.amount, structureFound.waterVolume * WATER_PER_TANK);
+    }
+
+    @Override
+    protected void onStructureDestroyed(SynchronizedBoilerData structure) {
+        if (structure.inventoryID != null) {
+            SynchronizedBoilerData.hotMap.remove(structure.inventoryID);
         }
-        if (structureFound.steamStored != null) {
-            structureFound.steamStored.amount = Math.min(structureFound.steamStored.amount, structureFound.steamVolume * STEAM_PER_TANK);
-        }
-        if (structureFound.InputGas != null) {
-            structureFound.InputGas.amount = Math.min(structureFound.InputGas.amount, structureFound.waterVolume * WATER_PER_TANK);
-        }
-        if (structureFound.OutputGas != null) {
-            structureFound.OutputGas.amount = Math.min(structureFound.OutputGas.amount, structureFound.steamVolume * STEAM_PER_TANK);
-        }
+        super.onStructureDestroyed(structure);
+    }
+
+    @Override
+    protected void onCacheIdsInvalidated(Set<String> staleIds) {
+        staleIds.forEach(SynchronizedBoilerData.hotMap::remove);
     }
 
     @Override

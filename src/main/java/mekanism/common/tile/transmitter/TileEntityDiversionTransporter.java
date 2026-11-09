@@ -16,10 +16,15 @@ import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.EnumActionResult;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.text.TextComponentString;
+import net.minecraftforge.items.CapabilityItemHandler;
+
+import javax.annotation.Nullable;
 
 public class TileEntityDiversionTransporter extends TileEntityLogisticalTransporter {
 
     public int[] modes = {0, 0, 0, 0, 0, 0};
+    @Nullable
+    private Boolean wasGettingPower;
 
     @Override
     public TransmitterType getTransmitterType() {
@@ -34,13 +39,14 @@ public class TileEntityDiversionTransporter extends TileEntityLogisticalTranspor
     @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
+        wasGettingPower = null;
         if (nbtTags.hasKey("modes")) {
             modes = nbtTags.getIntArray("modes");
         }
     }
 
     @Override
-   public void writeCustomNBT(NBTTagCompound nbtTags) {
+    public void writeCustomNBT(NBTTagCompound nbtTags) {
         super.writeCustomNBT(nbtTags);
         nbtTags.setIntArray("modes", modes);
     }
@@ -94,6 +100,10 @@ public class TileEntityDiversionTransporter extends TileEntityLogisticalTranspor
             case 1 -> description = LangUtils.localize("control.high.desc");
             case 2 -> description = LangUtils.localize("control.low.desc");
         }
+        if (super.exposesInsertCap(side)) {
+            invalidateCapability(CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, side);
+            MekanismUtils.notifyNeighborOfChange(getWorld(), side, getPos());
+        }
         refreshConnections();
         notifyTileChange();
         player.sendMessage(new TextComponentString(EnumColor.DARK_BLUE + Mekanism.LOG_TAG + EnumColor.GREY + " " +
@@ -103,13 +113,62 @@ public class TileEntityDiversionTransporter extends TileEntityLogisticalTranspor
     }
 
     @Override
+    public void onNeighborBlockChange(EnumFacing side) {
+        if (refreshPowerState()) {
+            byte current = getAllCurrentConnections();
+            refreshConnections();
+            if (current != getAllCurrentConnections()) {
+                markDirtyTransmitters();
+            }
+            for (EnumFacing direction : EnumFacing.VALUES) {
+                if (super.exposesInsertCap(direction)) {
+                    if (!modeReqsMet(direction)) {
+                        invalidateCapability(CapabilityItemHandler.ITEM_HANDLER_CAPABILITY, direction);
+                    }
+                    MekanismUtils.notifyNeighborOfChange(getWorld(), direction, getPos());
+                }
+            }
+        }
+    }
+
+    @Override
+    public boolean exposesInsertCap(EnumFacing side) {
+        return super.exposesInsertCap(side) && modeReqsMet(side);
+    }
+
+    @Override
     public boolean canConnect(EnumFacing side) {
-        if (!super.canConnect(side)) {
+        return super.canConnect(side) && modeReqsMet(side);
+    }
+
+    private boolean modeReqsMet(EnumFacing side) {
+        if (side == null) {
             return false;
         }
         int mode = modes[side.ordinal()];
-        boolean redstone = MekanismUtils.isGettingPowered(getWorld(), new Coord4D(getPos(), getWorld()));
-        return (mode != 2 || !redstone) && (mode != 1 || redstone);
+        return switch (mode) {
+            case 1 -> getPowerState();
+            case 2 -> !getPowerState();
+            default -> true;
+        };
+    }
+
+    protected final boolean getPowerState() {
+        if (wasGettingPower == null) {
+            wasGettingPower = queryPowerState();
+        }
+        return wasGettingPower;
+    }
+
+    protected final boolean refreshPowerState() {
+        boolean receivingPower = queryPowerState();
+        boolean changed = wasGettingPower == null || wasGettingPower != receivingPower;
+        wasGettingPower = receivingPower;
+        return changed;
+    }
+
+    protected boolean queryPowerState() {
+        return MekanismUtils.isGettingPowered(getWorld(), new Coord4D(getPos(), getWorld()));
     }
 
     @Override

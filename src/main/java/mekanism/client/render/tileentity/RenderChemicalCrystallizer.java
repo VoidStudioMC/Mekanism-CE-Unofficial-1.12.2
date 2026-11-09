@@ -25,10 +25,11 @@ public class RenderChemicalCrystallizer extends TileEntitySpecialRenderer<TileEn
 
     private static GasRenderMap<DisplayInteger[]> cachedCenterGas = new GasRenderMap<>();
 
-    private static final int stages = 700;
+    private static final int stages = 64;
     private ModelChemicalCrystallizer model = new ModelChemicalCrystallizer();
 
     public static void resetDisplayInts() {
+        cachedCenterGas.values().forEach(DisplayInteger::deleteAll);
         cachedCenterGas.clear();
     }
 
@@ -53,8 +54,7 @@ public class RenderChemicalCrystallizer extends TileEntitySpecialRenderer<TileEn
             MekanismRenderer.disableGlow(glowInfo);
             GlStateManager.disableBlend();
             GlStateManager.enableAlpha();
-            GlStateManager.enableLighting();
-            GlStateManager.disableCull();
+            MekanismRenderer.resetBlockRenderState();
             GlStateManager.popMatrix();
         }
 
@@ -63,7 +63,7 @@ public class RenderChemicalCrystallizer extends TileEntitySpecialRenderer<TileEn
         bindTexture(MekanismUtils.getResource(ResourceType.RENDER, "ChemicalCrystallizer.png"));
         MekanismRenderer.rotate(tileEntity.facing, 0, 180, 90, 270);
         GlStateManager.rotate(180, 0, 0, 1);
-        model.render(0.0625F,true);
+        model.render(0.0625F, true);
         GlStateManager.popMatrix();
         MekanismRenderer.machineRenderer().render(tileEntity, x, y, z, partialTick, destroyStage, alpha);
     }

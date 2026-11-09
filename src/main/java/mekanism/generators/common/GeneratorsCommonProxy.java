@@ -1,14 +1,15 @@
 package mekanism.generators.common;
 
+import mekanism.common.CommonProxy;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IGuiProvider;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.inventory.container.ContainerFilter;
 import mekanism.common.inventory.container.ContainerNull;
 import mekanism.common.tile.prefab.TileEntityContainerBlock;
 import mekanism.generators.common.block.states.BlockStateGenerator.GeneratorType;
 import mekanism.generators.common.inventory.container.*;
 import mekanism.generators.common.tile.*;
+import mekanism.generators.common.tile.fission.*;
 import mekanism.generators.common.tile.reactor.*;
 import mekanism.generators.common.tile.turbine.*;
 import net.minecraft.entity.player.EntityPlayer;
@@ -39,6 +40,11 @@ public class GeneratorsCommonProxy implements IGuiProvider {
         registerTileEntity(TileEntityElectromagneticCoil.class, "electromagnetic_coil");
         registerTileEntity(TileEntityGasGenerator.class, "gas_generator");
         registerTileEntity(TileEntityHeatGenerator.class, "heat_generator");
+        registerTileEntity(TileEntityFissionReactorCasing.class, "fission_reactor_casing");
+        registerTileEntity(TileEntityFissionReactorPort.class, "fission_reactor_port");
+        registerTileEntity(TileEntityFissionFuelAssembly.class, "fission_fuel_assembly");
+        registerTileEntity(TileEntityControlRodAssembly.class, "control_rod_assembly");
+        registerTileEntity(TileEntityFissionReactorLogicAdapter.class, "fission_reactor_logic_adapter");
         registerTileEntity(TileEntityReactorController.class, "reactor_controller");
         registerTileEntity(TileEntityReactorFrame.class, "reactor_frame");
         registerTileEntity(TileEntityReactorGlass.class, "reactor_glass");
@@ -99,18 +105,40 @@ public class GeneratorsCommonProxy implements IGuiProvider {
     @Override
     public Container getServerGui(int ID, EntityPlayer player, World world, BlockPos pos) {
         TileEntity tileEntity = world.getTileEntity(pos);
+        if (!CommonProxy.canOpenServerGui(player, tileEntity)) {
+            return null;
+        }
         return switch (ID) {
             case 0 -> new ContainerHeatGenerator(player.inventory, (TileEntityHeatGenerator) tileEntity);
             case 1 -> new ContainerSolarGenerator(player.inventory, (TileEntitySolarGenerator) tileEntity);
             case 3 -> new ContainerGasGenerator(player.inventory, (TileEntityGasGenerator) tileEntity);
             case 4 -> new ContainerBioGenerator(player.inventory, (TileEntityBioGenerator) tileEntity);
             case 5 -> new ContainerWindGenerator(player.inventory, (TileEntityWindGenerator) tileEntity);
-            case 6 -> new ContainerFilter(player.inventory, (TileEntityTurbineCasing) tileEntity);
+            case 6 -> new ContainerIndustrialTurbine(player.inventory, (TileEntityTurbineCasing) tileEntity);
             case 7 -> new ContainerNull(player, (TileEntityTurbineCasing) tileEntity);
             case 10 -> new ContainerReactorController(player.inventory, (TileEntityReactorController) tileEntity);
             case 11, 12, 13, 15 -> new ContainerNull(player, (TileEntityContainerBlock) tileEntity);
+            case 16 -> new ContainerFissionReactor(player.inventory, (TileEntityFissionReactorCasing) tileEntity);
+            case 17, 18 -> new ContainerNull(player, (TileEntityContainerBlock) tileEntity);
             default -> null;
         };
 
+    }
+
+    @Override
+    public boolean isValidServerGui(int ID, TileEntity tile) {
+        return switch (ID) {
+            case 0 -> tile instanceof TileEntityHeatGenerator;
+            case 1 -> tile instanceof TileEntitySolarGenerator;
+            case 3 -> tile instanceof TileEntityGasGenerator;
+            case 4 -> tile instanceof TileEntityBioGenerator;
+            case 5 -> tile instanceof TileEntityWindGenerator;
+            case 6, 7 -> tile instanceof TileEntityTurbineCasing;
+            case 10, 11, 12, 13 -> tile instanceof TileEntityReactorController;
+            case 15 -> tile instanceof TileEntityReactorLogicAdapter;
+            case 16, 17 -> tile instanceof TileEntityFissionReactorCasing;
+            case 18 -> tile instanceof TileEntityFissionReactorLogicAdapter;
+            default -> false;
+        };
     }
 }

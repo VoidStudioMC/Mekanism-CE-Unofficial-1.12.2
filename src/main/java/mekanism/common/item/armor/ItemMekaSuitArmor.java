@@ -5,11 +5,17 @@ import com.google.common.collect.Multimap;
 import ic2.api.item.IElectricItemManager;
 import ic2.api.item.IHazmatLike;
 import ic2.api.item.ISpecialElectricItem;
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.EnumColor;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.IContentsListener;
+import mekanism.api.energy.IEnergyContainer;
+import mekanism.api.functions.ConstantPredicates;
 import mekanism.api.functions.FloatSupplier;
+import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.IGasItem;
+import mekanism.api.gas.IExtendedGasTank;
+import mekanism.api.gas.IMekanismGasHandler;
 import mekanism.api.gear.ICustomModule;
 import mekanism.api.gear.ICustomModule.ModuleDamageAbsorbInfo;
 import mekanism.api.gear.IModule;
@@ -20,13 +26,19 @@ import mekanism.common.Mekanism;
 import mekanism.common.MekanismFluids;
 import mekanism.common.MekanismItems;
 import mekanism.common.MekanismModules;
+import mekanism.common.capabilities.Capabilities;
 import mekanism.common.capabilities.ItemCapabilityWrapper;
+import mekanism.common.capabilities.energy.BasicEnergyContainer;
+import mekanism.common.capabilities.energy.item.RateLimitEnergyHandler;
+import mekanism.common.capabilities.gas.item.ItemStackMekanismGasHandler;
+import mekanism.common.capabilities.gas.item.RateLimitGasHandler;
 import mekanism.common.capabilities.laser.item.LaserDissipationHandler;
 import mekanism.common.capabilities.radiation.item.NCRadiationShieldingHandler;
 import mekanism.common.capabilities.radiation.item.RadiationShieldingHandler;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.content.gear.IModuleContainerItem;
 import mekanism.common.content.gear.Module;
+import mekanism.common.content.gear.shared.ModuleColorModulationUnit;
 import mekanism.common.content.gear.shared.ModuleEnergyUnit;
 import mekanism.common.entity.EntityMeka;
 import mekanism.common.integration.MekanismHooks;
@@ -34,10 +46,14 @@ import mekanism.common.integration.forgeenergy.ForgeEnergyItemWrapper;
 import mekanism.common.integration.ic2.IC2ItemManager;
 import mekanism.common.integration.redstoneflux.RFIntegration;
 import mekanism.common.integration.tesla.TeslaItemWrapper;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
+import mekanism.common.item.interfaces.ILegacyEnergizedItem;
 import mekanism.common.item.interfaces.IModeItem;
-import mekanism.common.util.ItemDataUtils;
+import mekanism.common.lib.Color;
+import mekanism.common.util.ItemOverlayUtils;
 import mekanism.common.util.LangUtils;
 import mekanism.common.util.MekanismUtils;
+import mekanism.common.util.StorageUtils;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.util.ITooltipFlag;
 import net.minecraft.creativetab.CreativeTabs;
@@ -53,6 +69,7 @@ import net.minecraft.item.ItemArmor;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.DamageSource;
+import net.minecraft.util.EnumFacing;
 import net.minecraft.util.NonNullList;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
@@ -66,14 +83,15 @@ import org.jetbrains.annotations.NotNull;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.*;
+import java.util.function.Predicate;
 
 @Optional.InterfaceList({
         @Optional.Interface(iface = "ic2.api.item.ISpecialElectricItem", modid = MekanismHooks.IC2_MOD_ID),
         @Optional.Interface(iface = "cofh.redstoneflux.api.IEnergyContainerItem", modid = MekanismHooks.REDSTONEFLUX_MOD_ID),
         @Optional.Interface(iface = "ic2.api.item.IHazmatLike", modid = MekanismHooks.IC2_MOD_ID),
 })
-public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedItem, IModuleContainerItem, IModeItem,
-        ISpecialElectricItem, IEnergyContainerItem, IHazmatLike, Magnetic {
+public abstract class ItemMekaSuitArmor extends ItemArmor implements IModuleContainerItem, IModeItem,
+        ILegacyEnergizedItem, ISpecialElectricItem, IEnergyContainerItem, IHazmatLike, Magnetic {
 
     private static final Set<DamageSource> ALWAYS_SUPPORTED_SOURCES = new LinkedHashSet<>(Arrays.asList(
             DamageSource.ANVIL, DamageSource.CACTUS, DamageSource.CRAMMING, DamageSource.DRAGON_BREATH,
@@ -145,7 +163,7 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
         if (MekKeyHandler.getIsKeyPressed(MekanismKeyHandler.sneakKey)) {
             addModuleDetails(stack, tooltip);
         } else {
-            tooltip.add(EnumColor.AQUA + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(getEnergy(stack), getMaxEnergy(stack)));
+            tooltip.add(EnumColor.AQUA + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(StorageUtils.getStoredEnergy(stack), getEnergyCapacity(stack)));
             addInformation(stack, world, tooltip);
             tooltip.add(LangUtils.localize("tooltip.hold") + " " + EnumColor.INDIGO + GameSettings.getKeyDisplayString(MekanismKeyHandler.sneakKey.getKeyCode()) + EnumColor.GREY + " " + LangUtils.localize("tooltip.forDetails") + ".");
         }
@@ -159,13 +177,14 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
 
     @Override
     public boolean showDurabilityBar(ItemStack stack) {
-        return getEnergy(stack) > 0;
+        return StorageUtils.getStoredEnergy(stack) > 0;
     }
 
 
     @Override
     public double getDurabilityForDisplay(ItemStack stack) {
-        return 1D - (getEnergy(stack) / getMaxEnergy(stack));
+        double capacity = getEnergyCapacity(stack);
+        return capacity <= 0 ? 1D : 1D - (StorageUtils.getStoredEnergy(stack) / capacity);
     }
 
     @Override
@@ -190,31 +209,43 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
         items.add(discharged);
 
         ItemStack stack = new ItemStack(this);
-        setEnergy(stack, ((IEnergizedItem) stack.getItem()).getMaxEnergy(stack));
+        StorageUtils.setStoredEnergy(stack, getEnergyCapacity(stack), getEnergyCapacity(stack));
         items.add(stack);
 
         ItemStack FullStack = new ItemStack(this);
         setAllModule(FullStack);
-        setEnergy(FullStack, ((IEnergizedItem) FullStack.getItem()).getMaxEnergy(FullStack));
-        if (FullStack.getItem() instanceof IGasItem gasItem) {
-            if (FullStack.getItem() == MekanismItems.MEKASUIT_HELMET) {
-                gasItem.setGas(FullStack, new GasStack(MekanismFluids.NutritionalPaste, gasItem.getMaxGas(FullStack)));
-            } else if (FullStack.getItem() == MekanismItems.MEKASUIT_BODYARMOR) {
-                gasItem.setGas(FullStack, new GasStack(MekanismFluids.Hydrogen, gasItem.getMaxGas(FullStack)));
-            }
+        StorageUtils.setStoredEnergy(FullStack, getEnergyCapacity(FullStack), getEnergyCapacity(FullStack));
+        if (FullStack.getItem() == MekanismItems.MEKASUIT_HELMET) {
+            GasInventorySlot.setGasContained(FullStack, new GasStack(MekanismFluids.NutritionalPaste, getGasCapabilityCapacity(FullStack)));
+        } else if (FullStack.getItem() == MekanismItems.MEKASUIT_BODYARMOR) {
+            GasInventorySlot.setGasContained(FullStack, new GasStack(MekanismFluids.Hydrogen, getGasCapabilityCapacity(FullStack)));
         }
         addALLItemStack(FullStack);
         items.add(FullStack);
     }
 
-    public void addALLItemStack(ItemStack stack){
+    public void addALLItemStack(ItemStack stack) {
 
     }
 
     @Override
     public void onArmorTick(World world, EntityPlayer player, ItemStack stack) {
         super.onArmorTick(world, player, stack);
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
         getModules(stack).forEach(module -> module.tick(player));
+    }
+
+    @Override
+    public void onUpdate(ItemStack stack, World world, Entity entity, int itemSlot, boolean isSelected) {
+        super.onUpdate(stack, world, entity, itemSlot, isSelected);
+        getModules(stack).forEach(module -> module.onUpdateModule(stack, world, entity, itemSlot, isSelected));
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
+    }
+
+    @Override
+    public void onCreated(ItemStack stack, World world, EntityPlayer player) {
+        super.onCreated(stack, world, player);
+        NCRadiationShieldingHandler.clearLegacyArmorShieldingTag(stack);
     }
 
     @Override
@@ -235,17 +266,36 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
 
     @Override
     public String getArmorTexture(ItemStack stack, Entity entity, EntityEquipmentSlot slot, String type) {
-        return "mekanism:render/MekAsuit.png";
+        boolean overlay = "overlay".equals(type);
+        if (slot == EntityEquipmentSlot.LEGS) {
+            return overlay ? "mekanism:render/mekasuitpants_overlay.png" : "mekanism:render/mekasuitpants.png";
+        }
+        return overlay ? "mekanism:render/mekasuit_overlay.png" : "mekanism:render/mekasuit.png";
+    }
+
+    @Nullable
+    public static Color getColorModulation(@NotNull ItemStack stack) {
+        if (stack.getItem() instanceof ItemMekaSuitArmor armor) {
+            IModule<ModuleColorModulationUnit> module = armor.getModule(stack, MekanismModules.COLOR_MODULATION_UNIT);
+            if (module != null) {
+                return module.getCustomInstance().getColor();
+            }
+        }
+        return null;
     }
 
     @Override
-    public double getMaxEnergy(ItemStack stack) {
+    public int getColor(ItemStack stack) {
+        Color color = getColorModulation(stack);
+        return color == null ? super.getColor(stack) : color.argb();
+    }
+
+    public double getEnergyCapacity(ItemStack stack) {
         IModule<ModuleEnergyUnit> module = getModule(stack, MekanismModules.ENERGY_UNIT);
         return module == null ? MekanismConfig.current().meka.mekaSuitBaseEnergyCapacity.val() : module.getCustomInstance().getEnergyCapacity(module);
     }
 
-    @Override
-    public double getMaxTransfer(ItemStack stack) {
+    public double getEnergyTransfer(ItemStack stack) {
         IModule<ModuleEnergyUnit> module = getModule(stack, MekanismModules.ENERGY_UNIT);
         return module == null ? MekanismConfig.current().meka.mekaSuitBaseChargeRate.val() : module.getCustomInstance().getChargeRate(module);
     }
@@ -275,9 +325,9 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
         //Start by looping the armor, allowing modules to absorb damage if they can
         for (ItemStack stack : player.getArmorInventoryList()) {
             if (!stack.isEmpty() && stack.getItem() instanceof ItemMekaSuitArmor armor) {
-                IEnergizedItem energyContainer = armor;
+                IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
                 if (energyContainer != null) {
-                    FoundArmorDetails details = new FoundArmorDetails(energyContainer, armor.getEnergy(stack), armor);
+                    FoundArmorDetails details = new FoundArmorDetails(energyContainer, armor);
                     armorDetails.add(details);
                     for (Module<?> module : details.armor.getModules(stack)) {
                         if (module.isEnabled()) {
@@ -327,15 +377,11 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
         }
         armorDetails.forEach(details -> {
             if (details.usageInfo.energyUsed != 0) {
-                player.getArmorInventoryList().forEach(stack -> {
-                    if (stack.getItem() == details.armor) {
-                        if (energyUseCallbacks == null) {
-                            details.energyContainer.extract(stack, details.usageInfo.energyUsed, true);
-                        } else {
-                            energyUseCallbacks.add(() -> details.energyContainer.extract(stack, details.usageInfo.energyUsed, true));
-                        }
-                    }
-                });
+                if (energyUseCallbacks == null) {
+                    details.energyContainer.extract(details.usageInfo.energyUsed, Action.EXECUTE, AutomationType.MANUAL);
+                } else {
+                    energyUseCallbacks.add(() -> details.energyContainer.extract(details.usageInfo.energyUsed, Action.EXECUTE, AutomationType.MANUAL));
+                }
             }
         });
         return Math.min(ratioAbsorbed, 1);
@@ -377,19 +423,16 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
     @Override
     @Optional.Method(modid = MekanismHooks.IC2_MOD_ID)
     public IElectricItemManager getManager(ItemStack itemStack) {
-        return IC2ItemManager.getManager(this);
+        return IC2ItemManager.getManager();
     }
 
     @Override
     @Optional.Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int receiveEnergy(ItemStack stack, int energy, boolean simulate) {
-        if (canReceive(stack)) {
-            double energyNeeded = getMaxEnergy(stack) - getEnergy(stack);
-            double toReceive = Math.min(RFIntegration.fromRF(energy), Math.min(energyNeeded, getMaxTransfer(stack)));
-            if (!simulate) {
-                setEnergy(stack, getEnergy(stack) + toReceive);
-            }
-            return RFIntegration.toRF(toReceive);
+        if (canReceiveEnergy(stack)) {
+            double amount = RFIntegration.fromRF(energy);
+            double remainder = StorageUtils.insertEnergy(stack, amount, Action.get(!simulate));
+            return RFIntegration.toRF(amount - remainder);
         }
         return 0;
     }
@@ -397,13 +440,8 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
     @Override
     @Optional.Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int extractEnergy(ItemStack theItem, int energy, boolean simulate) {
-        if (canSend(theItem)) {
-            double energyRemaining = getEnergy(theItem);
-            double toSend = Math.min(RFIntegration.fromRF(energy), Math.min(energyRemaining, getMaxTransfer(theItem)));
-            if (!simulate) {
-                setEnergy(theItem, getEnergy(theItem) - toSend);
-            }
-            return RFIntegration.toRF(toSend);
+        if (canSendEnergy(theItem)) {
+            return RFIntegration.toRF(StorageUtils.extractEnergy(theItem, RFIntegration.fromRF(energy), Action.get(!simulate)));
         }
         return 0;
     }
@@ -411,13 +449,13 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
     @Override
     @Optional.Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getEnergy(theItem));
+        return RFIntegration.toRF(StorageUtils.getStoredEnergy(theItem));
     }
 
     @Override
     @Optional.Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getMaxEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getMaxEnergy(theItem));
+        return RFIntegration.toRF(getEnergyCapacity(theItem));
     }
 
     @Override
@@ -467,13 +505,13 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
 
     //TODO - 1.18: Switch this to a record
     private static class FoundArmorDetails {
-        private final IEnergizedItem energyContainer;
+        private final IEnergyContainer energyContainer;
         private final EnergyUsageInfo usageInfo;
         private final ItemMekaSuitArmor armor;
 
-        public FoundArmorDetails(IEnergizedItem energyContainer, double energy, ItemMekaSuitArmor armor) {
+        public FoundArmorDetails(IEnergyContainer energyContainer, ItemMekaSuitArmor armor) {
             this.energyContainer = energyContainer;
-            this.usageInfo = new EnergyUsageInfo(energy);
+            this.usageInfo = new EnergyUsageInfo(energyContainer.getEnergy());
             this.armor = armor;
         }
 
@@ -495,43 +533,188 @@ public abstract class ItemMekaSuitArmor extends ItemArmor implements IEnergizedI
         return EnumRarity.EPIC;
     }
 
-    @Override
-    public double getEnergy(ItemStack itemStack) {
-        return ItemDataUtils.getDouble(itemStack, "energyStored");
+    public boolean canReceiveEnergy(ItemStack itemStack) {
+        return StorageUtils.getNeededEnergy(itemStack) > 0;
     }
 
-    @Override
-    public void setEnergy(ItemStack itemStack, double amount) {
-        if (amount == 0) {
-            NBTTagCompound dataMap = ItemDataUtils.getDataMap(itemStack);
-            dataMap.removeTag("energyStored");
-            if (dataMap.isEmpty() && itemStack.getTagCompound() != null) {
-                itemStack.getTagCompound().removeTag(ItemDataUtils.DATA_ID);
-            }
-        } else {
-            ItemDataUtils.setDouble(itemStack, "energyStored", Math.max(Math.min(amount, getMaxEnergy(itemStack)), 0));
-        }
-    }
-
-
-    @Override
-    public boolean canReceive(ItemStack itemStack) {
-        return getNeeded(itemStack) > 0;
-    }
-
-    @Override
-    public boolean canSend(ItemStack itemStack) {
+    public boolean canSendEnergy(ItemStack itemStack) {
         return false;
     }
 
+    protected boolean hasGasCapabilitySupport() {
+        return false;
+    }
+
+    protected boolean isGasCapabilityEnabled(ItemStack stack) {
+        return false;
+    }
+
+    protected int getGasCapabilityRate(ItemStack stack) {
+        return 0;
+    }
+
+    protected int getGasCapabilityCapacity(ItemStack stack) {
+        return 0;
+    }
+
+    protected Predicate<GasStack> getGasCapabilityValidator(ItemStack stack) {
+        return gasStack -> false;
+    }
+
+    protected IExtendedGasTank createGasCapabilityTank(ItemStack stack, IContentsListener listener) {
+        return new RateLimitGasHandler.RateLimitGasTank(() -> getGasCapabilityRate(stack), () -> getGasCapabilityCapacity(stack),
+                ConstantPredicates.notExternal(), (gasStack, automationType) -> isGasCapabilityEnabled(stack),
+                getGasCapabilityValidator(stack), listener);
+    }
+
+    protected void collectGasCapabilityTanks(ItemStack stack, IContentsListener listener, List<IExtendedGasTank> tanks) {
+        tanks.add(createGasCapabilityTank(stack, listener));
+    }
+
+    protected List<IExtendedGasTank> getGasCapabilityTanks(ItemStack stack, IContentsListener listener) {
+        List<IExtendedGasTank> tanks = new ArrayList<>();
+        collectGasCapabilityTanks(stack, listener, tanks);
+        return tanks;
+    }
+
+    protected boolean isGasCapabilityAvailable(ItemStack stack) {
+        if (!hasGasCapabilitySupport()) {
+            return false;
+        }
+        for (IExtendedGasTank tank : getGasCapabilityTanks(stack, null)) {
+            if (tank.getCapacity() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public int insertGas(ItemStack stack, GasStack gasStack) {
+        return GasInventorySlot.insertGas(stack, gasStack, true);
+    }
+
+    @Nullable
+    public GasStack useGas(ItemStack stack, Gas type, int amount) {
+        return GasInventorySlot.useGas(stack, type, amount);
+    }
+
+    @Nullable
+    public GasStack getContainedGas(ItemStack stack, Gas type) {
+        if (stack.isEmpty() || !isGasCapabilityAvailable(stack)) {
+            return null;
+        }
+        return GasInventorySlot.getContainedGas(stack, type, null);
+    }
+
+    @SideOnly(Side.CLIENT)
+    protected boolean renderGasCapabilityItemOverlayIntoGUI(@NotNull ItemStack stack, int xPosition, int yPosition) {
+        if (stack.isEmpty() || !hasGasCapabilitySupport()) {
+            return false;
+        }
+        IMekanismGasHandler gasHandler = GasInventorySlot.getUnstackedMekanismCapability(stack);
+        if (gasHandler == null) {
+            return false;
+        }
+        List<GasOverlayTank> tanks = getGasOverlayTanks(stack, gasHandler);
+        if (tanks.isEmpty()) {
+            return false;
+        }
+        List<ItemOverlayUtils.BarSegment> segments = new ArrayList<>(tanks.size());
+        for (GasOverlayTank overlayTank : tanks) {
+            GasStack gas = overlayTank.tank.getGas();
+            int stored = gas == null ? 0 : gas.amount;
+            segments.add(ItemOverlayUtils.BarSegment.fromAmount(stored, overlayTank.tank.getCapacity(),
+                    getGasOverlayColor(stack, overlayTank.tank, overlayTank.tankIndex)));
+        }
+        return ItemOverlayUtils.renderItemBarOverlayIntoGUI(xPosition, yPosition, segments);
+    }
+
+    @SideOnly(Side.CLIENT)
+    private List<GasOverlayTank> getGasOverlayTanks(ItemStack stack, IMekanismGasHandler gasHandler) {
+        List<GasOverlayTank> tanks = new ArrayList<>();
+        for (int tank = 0, count = gasHandler.getCountGasTanks(null); tank < count; tank++) {
+            IExtendedGasTank gasTank = gasHandler.getGasTank(tank, null);
+            if (gasTank != null && shouldRenderGasCapabilityTank(stack, gasTank, tank)) {
+                tanks.add(new GasOverlayTank(gasTank, tank));
+            }
+        }
+        tanks.sort(Comparator.comparingInt(tank -> getGasOverlaySortOrder(stack, tank.tank, tank.tankIndex)));
+        return tanks;
+    }
+
+    @SideOnly(Side.CLIENT)
+    protected boolean shouldRenderGasCapabilityTank(ItemStack stack, IExtendedGasTank tank, int tankIndex) {
+        return tank.getCapacity() > 0;
+    }
+
+    @SideOnly(Side.CLIENT)
+    protected int getGasOverlaySortOrder(ItemStack stack, IExtendedGasTank tank, int tankIndex) {
+        return tankIndex;
+    }
+
+    @SideOnly(Side.CLIENT)
+    protected boolean gasOverlayTankSupportsGas(IExtendedGasTank tank, Gas gas) {
+        GasStack stored = tank.getGas();
+        return stored != null && stored.getGas() == gas || tank.isValid(new GasStack(gas, 1));
+    }
+
+    @SideOnly(Side.CLIENT)
+    protected int getGasOverlayColor(ItemStack stack, IExtendedGasTank tank, int tankIndex) {
+        GasStack gas = tank.getGas();
+        return gas == null || gas.getGas() == null ? MathHelper.hsvToRGB(Math.max(0.0F, (float) (1 - getDurabilityForDisplay(stack))) / 3.0F, 1.0F, 1.0F) : gas.getGas().getTint();
+    }
 
     //TODO
     @Override
     public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
-        return new ItemCapabilityWrapper(stack, new TeslaItemWrapper(), new ForgeEnergyItemWrapper(),
-                LaserDissipationHandler.create(item -> isModuleEnabled(item, MekanismModules.LASER_DISSIPATION_UNIT) ? laserDissipation : 0, item -> isModuleEnabled(item, MekanismModules.LASER_DISSIPATION_UNIT) ? laserRefraction : 0),
-                RadiationShieldingHandler.create(item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) : 0),
-                NCRadiationShieldingHandler.create(item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) * 100 : 0, item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) * 100 : 0));
+        List<ItemCapabilityWrapper.ItemCapability> capabilities = new ArrayList<>();
+
+        capabilities.add(new TeslaItemWrapper());
+        capabilities.add(new ForgeEnergyItemWrapper());
+        capabilities.add(RateLimitEnergyHandler.create(() -> getEnergyTransfer(stack), () -> getEnergyCapacity(stack), BasicEnergyContainer.manualOnly, ConstantPredicates.alwaysTrue()));
+        capabilities.add(LaserDissipationHandler.create(item -> isModuleEnabled(item, MekanismModules.LASER_DISSIPATION_UNIT) ? laserDissipation : 0, item -> isModuleEnabled(item, MekanismModules.LASER_DISSIPATION_UNIT) ? laserRefraction : 0));
+        capabilities.add(RadiationShieldingHandler.create(item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) : 0));
+        if (mekanism.common.capabilities.Capabilities.NC_CAPABILITY_RADIATION_RESISTANCE != null) {
+            capabilities.add(NCRadiationShieldingHandler.create(item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) * 100 : 0, item -> isModuleEnabled(item, MekanismModules.RADIATION_SHIELDING_UNIT) ? ItemHazmatSuitArmor.getShieldingByArmor(armorType) * 100 : 0, false));
+        }
+        if (hasGasCapabilitySupport()) {
+            capabilities.add(new ItemStackMekanismGasHandler() {
+
+                @Override
+                protected List<IExtendedGasTank> getInitialTanks() {
+                    return ItemMekaSuitArmor.this.getGasCapabilityTanks(stack, this);
+                }
+            });
+        }
+        return new ItemCapabilityWrapper(stack, capabilities.toArray(new ItemCapabilityWrapper.ItemCapability[0])) {
+            @Override
+            public boolean hasCapability(@Nonnull net.minecraftforge.common.capabilities.Capability<?> capability, EnumFacing facing) {
+                if (capability == Capabilities.GAS_HANDLER_CAPABILITY && ItemMekaSuitArmor.this.hasGasCapabilitySupport()) {
+                    return ItemMekaSuitArmor.this.isGasCapabilityAvailable(itemStack);
+                }
+                return super.hasCapability(capability, facing);
+            }
+
+            @Override
+            public <T> T getCapability(@Nonnull net.minecraftforge.common.capabilities.Capability<T> capability, EnumFacing facing) {
+                if (capability == Capabilities.GAS_HANDLER_CAPABILITY &&
+                        !ItemMekaSuitArmor.this.isGasCapabilityAvailable(itemStack)) {
+                    return null;
+                }
+                return super.getCapability(capability, facing);
+            }
+        };
+    }
+
+    private static class GasOverlayTank {
+
+        private final IExtendedGasTank tank;
+        private final int tankIndex;
+
+        private GasOverlayTank(IExtendedGasTank tank, int tankIndex) {
+            this.tank = tank;
+            this.tankIndex = tankIndex;
+        }
     }
 
     @Override

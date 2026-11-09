@@ -1,73 +1,108 @@
 package mekanism.client.jei.machine;
 
 import mekanism.api.gas.GasStack;
-import mekanism.client.gui.element.GuiPowerBar;
-import mekanism.client.gui.element.GuiPowerBar.IPowerInfoHandler;
-import mekanism.client.gui.element.GuiProgress;
-import mekanism.client.gui.element.GuiProgress.IProgressInfoHandler;
-import mekanism.client.gui.element.GuiProgress.ProgressBar;
-import mekanism.client.gui.element.GuiSlot.SlotType;
-import mekanism.client.gui.element.bar.GuiBar;
-import mekanism.client.gui.element.slot.GuiEnergySlot;
-import mekanism.client.gui.element.slot.GuiExtraSlot;
-import mekanism.client.gui.element.slot.GuiInputSlot;
-import mekanism.client.gui.element.slot.GuiOutputSlot;
+import mekanism.api.recipes.FarmChanceOutput;
+import mekanism.client.gui.element.bar.GuiEmptyBar;
+import mekanism.client.gui.element.progress.GuiProgress;
+import mekanism.client.gui.element.progress.ProgressType;
+import mekanism.client.gui.element.slot.GuiSlot;
+import mekanism.client.gui.element.slot.SlotType;
 import mekanism.client.jei.BaseRecipeCategory;
 import mekanism.client.jei.MekanismJEI;
 import mekanism.common.recipe.machines.FarmMachineRecipe;
-import mekanism.common.recipe.outputs.ChanceOutput;
+import mekanism.common.recipe.outputs.FarmOutput;
 import mekanism.common.tile.prefab.TileEntityFarmMachine;
+import mekanism.common.util.LangUtils;
 import mezz.jei.api.IGuiHelper;
+import mezz.jei.api.gui.IGuiFluidStackGroup;
 import mezz.jei.api.gui.IGuiIngredientGroup;
 import mezz.jei.api.gui.IGuiItemStackGroup;
 import mezz.jei.api.gui.IRecipeLayout;
 import mezz.jei.api.ingredients.IIngredients;
 
+import java.math.BigDecimal;
+import java.util.List;
+
 public class FarmMachineRecipeCategory<RECIPE extends FarmMachineRecipe<RECIPE>, WRAPPER extends FarmMachineRecipeWrapper<RECIPE>> extends BaseRecipeCategory<WRAPPER> {
 
-    public FarmMachineRecipeCategory(IGuiHelper helper, String name, String unlocalized, ProgressBar progress) {
-        super(helper, "mekanism:gui/Null.png", name, unlocalized, progress, 28, 16, 144, 54);
+    private static final int INPUT_ITEM_INDEX = 0;
+    private static final int GUARANTEED_OUTPUT_INDEX = 1;
+    private static final int FIRST_CHANCE_OUTPUT_INDEX = 2;
+    private static final int FUEL_ITEM_INDEX = TileEntityFarmMachine.OUTPUT_SLOT_COUNT + 1;
+    private static final int OUTPUT_GRID_X = 20;
+    private static final int OUTPUT_COLUMNS = 8;
+    private static final int RECIPE_WIDTH = OUTPUT_GRID_X + OUTPUT_COLUMNS * 18;
+    private static final int RECIPE_HEIGHT = OUTPUT_COLUMNS * 18;
+
+    private GuiSlot input;
+    private GuiSlot extra;
+    private GuiSlot[] outputSlots;
+    private GuiEmptyBar gasInput;
+
+    public FarmMachineRecipeCategory(IGuiHelper helper, String name, String unlocalized, ProgressType progress) {
+        super(helper, DUMMY_GUI_TEXTURE, name, unlocalized, 0, 0, RECIPE_WIDTH, RECIPE_HEIGHT, progress);
     }
 
     @Override
     protected void addGuiElements() {
-        guiElements.add(new GuiInputSlot(this, guiLocation, 55, 16));
-        guiElements.add(new GuiEnergySlot(this, guiLocation, 30, 34));
-        guiElements.add(new GuiExtraSlot(this, guiLocation, 55, 52));
-        guiElements.add(new GuiOutputSlot(SlotType.OUTPUT_WIDE, this, guiLocation, 111, 30));
-        guiElements.add(new GuiPowerBar(this, new IPowerInfoHandler() {
-            @Override
-            public double getLevel() {
-                return 1F;
-            }
-        }, guiLocation, 164, 15));
-        guiElements.add(new GuiProgress(new IProgressInfoHandler() {
+        // BaseRecipeCategory invokes this method from its constructor, before subclass fields initialize.
+        outputSlots = new GuiSlot[TileEntityFarmMachine.OUTPUT_SLOT_COUNT];
+        input = addElement(new GuiSlot(SlotType.INPUT, this, 0, 0).setRenderAboveSlots());
+        extra = addElement(new GuiSlot(SlotType.EXTRA, this, 0, 36).setRenderAboveSlots());
+        gasInput = addElement(new GuiEmptyBar(this, 4, 19, 8, 14));
+        guiElements.add(new GuiProgress(new mekanism.client.gui.element.progress.IProgressInfoHandler() {
             @Override
             public double getProgress() {
                 return (double) timer.getValue() / 20F;
             }
-        }, progressBar, this, guiLocation, 77, 37,false));
-        guiElements.add(new GuiBar(this, guiLocation, 60, 36, 8, 14));
+
+            @Override
+            public boolean isGuiInJei() {
+                return true;
+            }
+        }, progressType, this, 0, 60));
+        for (int slot = 0; slot < outputSlots.length; slot++) {
+            int x = OUTPUT_GRID_X + slot % OUTPUT_COLUMNS * 18;
+            int y = slot / OUTPUT_COLUMNS * 18;
+            outputSlots[slot] = addElement(new GuiSlot(SlotType.OUTPUT, this, x, y).setRenderAboveSlots());
+        }
     }
 
     @Override
     public void setRecipe(IRecipeLayout recipeLayout, WRAPPER recipeWrapper, IIngredients ingredients) {
         FarmMachineRecipe<?> tempRecipe = recipeWrapper.getRecipe();
         IGuiItemStackGroup itemStacks = recipeLayout.getItemStacks();
-        itemStacks.init(0, true, 27, 0);
-        itemStacks.init(1, false, 87, 18);
-        itemStacks.init(2, false, 103, 18);
-        itemStacks.init(3, false, 27, 36);
-        itemStacks.set(0, tempRecipe.recipeInput.itemStack);
-        ChanceOutput output = tempRecipe.getOutput();
-        if (output.hasPrimary()) {
-            itemStacks.set(1, output.primaryOutput);
+        initItem(itemStacks, INPUT_ITEM_INDEX, true, input, tempRecipe.recipeInput.itemStack);
+        FarmOutput output = tempRecipe.getOutput();
+        initItem(itemStacks, GUARANTEED_OUTPUT_INDEX, false, outputSlots[0], output.getGuaranteedOutput());
+        List<FarmChanceOutput> chanceOutputs = output.getChanceOutputs();
+        for (int chanceIndex = 0; chanceIndex < chanceOutputs.size(); chanceIndex++) {
+            initItem(itemStacks, FIRST_CHANCE_OUTPUT_INDEX + chanceIndex, false, outputSlots[chanceIndex + 1],
+                    chanceOutputs.get(chanceIndex).getOutput());
         }
-        if (output.hasSecondary()) {
-            itemStacks.set(2, output.secondaryOutput);
+        itemStacks.addTooltipCallback((slotIndex, input, ingredient, tooltip) -> {
+            int chanceIndex = slotIndex - FIRST_CHANCE_OUTPUT_INDEX;
+            if (!input && chanceIndex >= 0 && chanceIndex < chanceOutputs.size()) {
+                double chance = chanceOutputs.get(chanceIndex).getChance();
+                if (chance < 1) {
+                    tooltip.add(LangUtils.localize("gui.probability2") + ": " + formatChance(chance));
+                }
+            }
+        });
+        int amount = recipeWrapper.getSecondaryInputAmount();
+        if (tempRecipe.recipeInput.isGasInput()) {
+            initItem(itemStacks, FUEL_ITEM_INDEX, false, extra, recipeWrapper.getFuelStacks(tempRecipe.recipeInput.gasInput.getGas()));
+            IGuiIngredientGroup<GasStack> gasStacks = recipeLayout.getIngredientsGroup(MekanismJEI.TYPE_GAS);
+            initGas(gasStacks, 0, true, gasInput,
+                    java.util.Collections.singletonList(tempRecipe.recipeInput.gasInput.copy().withAmount(amount)), false);
+        } else if (tempRecipe.recipeInput.isFluidInput()) {
+            IGuiFluidStackGroup fluidStacks = recipeLayout.getFluidStacks();
+            initFluid(fluidStacks, 0, true, gasInput,
+                    new net.minecraftforge.fluids.FluidStack(tempRecipe.recipeInput.fluidInput, amount));
         }
-        itemStacks.set(3, recipeWrapper.getFuelStacks(tempRecipe.recipeInput.gasType));
-        IGuiIngredientGroup<GasStack> gasStacks = recipeLayout.getIngredientsGroup(MekanismJEI.TYPE_GAS);
-        initGas(gasStacks, 0, true, 33, 21, 6, 12, new GasStack(tempRecipe.recipeInput.gasType, TileEntityFarmMachine.BASE_TICKS_REQUIRED * TileEntityFarmMachine.BASE_GAS_PER_TICK), false);
+    }
+
+    static String formatChance(double chance) {
+        return BigDecimal.valueOf(chance).movePointRight(2).stripTrailingZeros().toPlainString() + "%";
     }
 }

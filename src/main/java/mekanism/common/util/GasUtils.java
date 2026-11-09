@@ -1,21 +1,20 @@
 package mekanism.common.util;
 
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.gas.*;
-import mekanism.common.base.target.GasHandlerTarget;
 import mekanism.common.capabilities.Capabilities;
-import mekanism.common.config.MekanismConfig;
+import mekanism.common.content.network.distribution.GasHandlerTarget;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
+import mekanism.common.tile.prefab.TileEntityBasicBlock;
 import net.minecraft.item.ItemStack;
-import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
 
 import javax.annotation.Nullable;
-import java.util.Collection;
 import java.util.EnumSet;
 import java.util.Set;
-import java.util.function.Predicate;
+import java.util.function.BiFunction;
 
 /**
  * A handy class containing several utilities for efficient gas transfer.
@@ -24,68 +23,176 @@ import java.util.function.Predicate;
  */
 public final class GasUtils {
 
-    public static IGasHandler[] getConnectedAcceptors(BlockPos pos, World world, Collection<EnumFacing> sides) {
-        final IGasHandler[] acceptors = {null, null, null, null, null, null};
-        EmitUtils.forEachSide(world, pos, sides, (tile, side) ->
-                acceptors[side.ordinal()] = CapabilityUtils.getCapability(tile, Capabilities.GAS_HANDLER_CAPABILITY, side.getOpposite()));
-        return acceptors;
+    private GasUtils() {
     }
 
     /**
-     * Gets all the acceptors around a tile entity.
+     * Removes a specified amount of gas from a gas container item.
      *
-     * @return array of IGasAcceptors
-     */
-    public static IGasHandler[] getConnectedAcceptors(BlockPos pos, World world) {
-        return getConnectedAcceptors(pos, world, EnumSet.allOf(EnumFacing.class));
-    }
-
-    public static boolean isValidAcceptorOnSide(TileEntity tile, EnumFacing side) {
-        if (CapabilityUtils.hasCapability(tile, Capabilities.GRID_TRANSMITTER_CAPABILITY, side.getOpposite())) {
-            return false;
-        }
-        return CapabilityUtils.hasCapability(tile, Capabilities.GAS_HANDLER_CAPABILITY, side.getOpposite());
-    }
-
-    public static void clearIfInvalid(GasTank tank, Predicate<Gas> isValid) {
-        if (MekanismConfig.current().general.voidInvalidGases.val()) {
-            Gas gas = tank.getGasType();
-            if (gas != null && !isValid.test(gas)) {
-                tank.setGas(null);
-            }
-        }
-    }
-
-    /**
-     * Removes a specified amount of gas from an IGasItem.
-     *
-     * @param itemStack - ItemStack of the IGasItem
-     * @param type      - type of gas to remove from the IGasItem, null if it doesn't matter
+     * @param itemStack - ItemStack of the gas container
+     * @param type      - type of gas to remove from the container, null if it doesn't matter
      * @param amount    - amount of gas to remove from the ItemStack
-     * @return the GasStack removed by the IGasItem
+     * @return the GasStack removed by the container
      */
     public static GasStack removeGas(ItemStack itemStack, Gas type, int amount) {
-        if (!itemStack.isEmpty() && itemStack.getItem() instanceof IGasItem item) {
-            if (type != null && item.getGas(itemStack) != null && item.getGas(itemStack).getGas() != type || !item.canProvideGas(itemStack, type)) {
-                return null;
-            }
-            return item.removeGas(itemStack, amount);
-        }
-        return null;
+        return GasInventorySlot.useGas(itemStack, type, amount);
     }
 
     /**
-     * Adds a specified amount of gas to an IGasItem.
+     * Adds a specified amount of gas to a gas container item.
      *
-     * @param itemStack - ItemStack of the IGasItem
-     * @param stack     - stack to add to the IGasItem
-     * @return amount of gas accepted by the IGasItem
+     * @param itemStack - ItemStack of the gas container
+     * @param stack     - stack to add to the container
+     * @return amount of gas accepted by the container
      */
     public static int addGas(ItemStack itemStack, GasStack stack) {
-        if (!itemStack.isEmpty() && itemStack.getItem() instanceof IGasItem gasItem && gasItem.canReceiveGas(itemStack, stack.getGas()) && (gasItem.getGas(itemStack) == null || (gasItem.getGas(itemStack) != null && gasItem.getGas(itemStack).amount != gasItem.getMaxGas(itemStack)))) {
-            return gasItem.addGas(itemStack, stack.copy());
+        return GasInventorySlot.insertGas(itemStack, stack, true);
+    }
+
+    public static int simulateAddGas(ItemStack itemStack, GasStack stack) {
+        return GasInventorySlot.insertGas(itemStack, stack, false);
+    }
+
+    public static boolean hasGasHandler(ItemStack stack) {
+        return GasInventorySlot.isGasContainerItem(stack);
+    }
+
+    public static boolean isGasItem(ItemStack stack) {
+        return GasInventorySlot.isGasContainerItem(stack);
+    }
+
+    public static boolean canProvideGas(ItemStack stack, @Nullable Gas type) {
+        return GasInventorySlot.canProvideGas(stack, type);
+    }
+
+    public static boolean canReceiveGas(ItemStack stack, @Nullable Gas type) {
+        return GasInventorySlot.canReceiveGas(stack, type);
+    }
+
+    public static boolean canReceiveGas(@Nullable IGasHandler gasHandler, @Nullable Gas type) {
+        return GasInventorySlot.canReceiveGas(gasHandler, type);
+    }
+
+    public static boolean canReceiveGas(@Nullable IGasHandler gasHandler, @Nullable EnumFacing side, @Nullable Gas type) {
+        return GasInventorySlot.canReceiveGas(gasHandler, side, type);
+    }
+
+    public static boolean canReceiveGas(@Nullable IGasHandler gasHandler, @Nullable EnumFacing side, @Nullable GasStack stack) {
+        return GasInventorySlot.canReceiveGas(gasHandler, side, stack);
+    }
+
+    @Nullable
+    public static GasStack getGasContained(ItemStack stack) {
+        return GasInventorySlot.getContainedGas(stack);
+    }
+
+    @Nullable
+    public static <T> T getExtractableGas(ItemStack stack, int needed, BiFunction<Gas, Integer, T> getIfValid) {
+        return GasInventorySlot.getExtractableGas(stack, needed, getIfValid);
+    }
+
+    @Nullable
+    public static IGasHandler getGasHandlerCapability(ItemStack stack) {
+        return GasInventorySlot.getCapability(stack);
+    }
+
+    @Nullable
+    public static IGasHandler getUnstackedGasHandlerCapability(ItemStack stack) {
+        return GasInventorySlot.getUnstackedCapability(stack);
+    }
+
+    @Nullable
+    public static IMekanismGasHandler getCapabilityGasHandler(ItemStack stack) {
+        return GasInventorySlot.getMekanismCapability(stack);
+    }
+
+    @Nullable
+    public static IMekanismGasHandler getUnstackedCapabilityGasHandler(ItemStack stack) {
+        return GasInventorySlot.getUnstackedMekanismCapability(stack);
+    }
+
+    @Nullable
+    public static GasStack getCapabilityStoredGas(ItemStack stack) {
+        return GasInventorySlot.getCapabilityStoredGas(stack);
+    }
+
+    public static boolean setGasContained(ItemStack stack, @Nullable GasStack gasStack) {
+        return GasInventorySlot.setGasContained(stack, gasStack);
+    }
+
+    public static boolean setCapabilityStoredGas(ItemStack stack, @Nullable GasStack gasStack) {
+        return GasInventorySlot.setCapabilityStoredGas(stack, gasStack);
+    }
+
+    @Nullable
+    public static GasStack useGas(ItemStack itemStack, @Nullable Gas type, int amount) {
+        return GasInventorySlot.useGas(itemStack, type, amount);
+    }
+
+    public static int getTankCount(ItemStack stack) {
+        return GasInventorySlot.getTankCount(stack);
+    }
+
+    @Nullable
+    public static GasStack getGasInTank(ItemStack stack, int tank) {
+        return GasInventorySlot.getGasInTank(stack, tank);
+    }
+
+    public static int getTankCapacity(ItemStack stack, int tank) {
+        return GasInventorySlot.getTankCapacity(stack, tank);
+    }
+
+    public static int getTankCount(@Nullable IGasHandler gasHandler) {
+        return GasInventorySlot.getTankCount(gasHandler);
+    }
+
+    @Nullable
+    public static GasStack getGasInTank(@Nullable IGasHandler gasHandler, int tank) {
+        return GasInventorySlot.getGasInTank(gasHandler, tank);
+    }
+
+    public static int getTankCapacity(@Nullable IGasHandler gasHandler, int tank) {
+        return GasInventorySlot.getTankCapacity(gasHandler, tank);
+    }
+
+    @Nullable
+    public static GasStack extractGas(@Nullable IGasHandler gasHandler, @Nullable Gas type, int amount, boolean doTransfer) {
+        return extractGas(gasHandler, null, type, amount, doTransfer);
+    }
+
+    public static int insertGas(@Nullable IGasHandler gasHandler, @Nullable GasStack stack, boolean doTransfer) {
+        return insertGas(gasHandler, null, stack, doTransfer);
+    }
+
+    @Nullable
+    public static GasStack extractGas(@Nullable IGasHandler gasHandler, @Nullable EnumFacing side, @Nullable Gas type, int amount, boolean doTransfer) {
+        return GasInventorySlot.extractGas(gasHandler, side, type, amount, doTransfer);
+    }
+
+    public static int insertGas(@Nullable IGasHandler gasHandler, @Nullable EnumFacing side, @Nullable GasStack stack, boolean doTransfer) {
+        return GasInventorySlot.insertGas(gasHandler, side, stack, doTransfer);
+    }
+
+    public static void emit(IExtendedGasTank tank, TileEntity from) {
+        emit(EnumSet.allOf(EnumFacing.class), tank, from);
+    }
+
+    public static void emit(Set<EnumFacing> outputSides, IExtendedGasTank tank, TileEntity from) {
+        emit(outputSides, tank, from, tank.getCapacity());
+    }
+
+    public static void emit(Set<EnumFacing> outputSides, IExtendedGasTank tank, TileEntity from, int maxOutput) {
+        emit(outputSides, tank, from, maxOutput, from instanceof TileEntityBasicBlock ? (TileEntityBasicBlock) from : null);
+    }
+
+    public static void emit(Set<EnumFacing> outputSides, IExtendedGasTank tank, TileEntity from, int maxOutput,
+                            @Nullable TileEntityBasicBlock cacheOwner) {
+        if (!tank.isEmpty() && maxOutput > 0) {
+            GasStack simulated = tank.extract(maxOutput, Action.SIMULATE, AutomationType.INTERNAL);
+            if (simulated != null && simulated.amount > 0) {
+                tank.extract(emit(simulated, from, outputSides, cacheOwner), Action.EXECUTE, AutomationType.INTERNAL);
+            }
         }
-        return 0;
     }
 
     /**
@@ -97,45 +204,47 @@ public final class GasUtils {
      * @return the amount of gas emitted
      */
     public static int emit(GasStack stack, TileEntity from, Set<EnumFacing> sides) {
-        if (stack == null || stack.amount == 0) {
+        return emit(stack, from, sides, new GasHandlerTarget(stack, 6),
+                from instanceof TileEntityBasicBlock ? (TileEntityBasicBlock) from : null);
+    }
+
+    public static int emit(GasStack stack, TileEntity from, Set<EnumFacing> sides, @Nullable TileEntityBasicBlock cacheOwner) {
+        return emit(stack, from, sides, new GasHandlerTarget(stack, 6), cacheOwner);
+    }
+
+    /**
+     * Emits gas using a caller-owned target. The target is reset before collection so its backing lists can be reused safely.
+     */
+    public static int emit(GasStack stack, TileEntity from, Set<EnumFacing> sides, GasHandlerTarget target) {
+        return emit(stack, from, sides, target, null);
+    }
+
+    private static int emit(GasStack stack, TileEntity from, Set<EnumFacing> sides, GasHandlerTarget target,
+                            @Nullable TileEntityBasicBlock cacheOwner) {
+        target.reset(stack);
+        if (stack == null || stack.amount == 0 || sides.isEmpty()) {
             return 0;
         }
 
         //Fake that we have one target given we know that no sides will overlap
         // This allows us to have slightly better performance
-        final GasHandlerTarget target = new GasHandlerTarget(stack);
         if (from != null) {
             EmitUtils.forEachSide(from.getWorld(), from.getPos(), sides, (acceptor, side) -> {
                 //Invert to get access side
                 final EnumFacing accessSide = side.getOpposite();
                 //Collect cap
-                CapabilityUtils.runIfCap(acceptor, Capabilities.GAS_HANDLER_CAPABILITY, accessSide,
-                        (handler) -> {
-                            if (handler.canReceiveGas(accessSide, stack.getGas())) {
-                                target.addHandler(accessSide, handler);
-                            }
-                        });
+                IGasHandler handler = cacheOwner == null ?
+                        CapabilityUtils.getCapability(acceptor, Capabilities.GAS_HANDLER_CAPABILITY, accessSide) :
+                        cacheOwner.getCachedGasHandler(acceptor, accessSide);
+                if (handler != null && canReceiveGas(handler, accessSide, stack)) {
+                    target.addHandler(accessSide, handler);
+                }
             });
         }
-        int curHandlers = target.getHandlers().size();
-        if (curHandlers > 0) {
-            return EmitUtils.sendToAcceptors(java.util.Collections.singleton(target), curHandlers, stack.amount, stack);
+        if (target.getHandlerCount() > 0) {
+            return EmitUtils.sendToAcceptors(target, stack.amount, stack);
         }
         return 0;
-    }
-
-    public static void writeSustainedData(GasTank gasTank, ItemStack itemStack) {
-        if (gasTank.stored != null && gasTank.stored.getGas() != null) {
-            ItemDataUtils.setCompound(itemStack, "gasStored", gasTank.stored.write(new NBTTagCompound()));
-        }
-    }
-
-    public static void readSustainedData(GasTank gasTank, ItemStack itemStack) {
-        if (ItemDataUtils.hasData(itemStack, "gasStored")) {
-            gasTank.stored = GasStack.readFromNBT(ItemDataUtils.getCompound(itemStack, "gasStored"));
-        } else {
-            gasTank.stored = null;
-        }
     }
 
     public static boolean canDrain(@Nullable GasStack tankGas, @Nullable Gas outGas) {

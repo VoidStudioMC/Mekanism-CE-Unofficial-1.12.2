@@ -1,8 +1,7 @@
 package mekanism.client.render;
 
-import mekanism.api.energy.IEnergizedItem;
 import mekanism.api.gear.IHUDElement;
-import mekanism.client.gui.element.GuiUtils;
+import mekanism.client.gui.GuiUtils;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.content.gear.HUDElement;
 import mekanism.common.content.gear.IModuleContainerItem;
@@ -11,6 +10,7 @@ import mekanism.common.item.ItemMekaTool;
 import mekanism.common.item.armor.ItemMekaSuitArmor;
 import mekanism.common.util.LangUtils;
 import mekanism.common.util.MekanismUtils;
+import mekanism.common.util.StorageUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.FontRenderer;
 import net.minecraft.client.renderer.GlStateManager;
@@ -97,7 +97,7 @@ public class HUDRenderer {
         for (int i = 0; i < ARMOR_SLOTS.length; i++) {
             posX += renderEnergyIcon(player, font, posX, color, ARMOR_ICONS[i], ARMOR_SLOTS[i], showArmorPercent);
         }
-        Predicate<Item> showToolPercent = item ->  item instanceof ItemMekaTool;
+        Predicate<Item> showToolPercent = item -> item instanceof ItemMekaTool;
         for (EntityEquipmentSlot hand : HAND_SLOTS) {
             posX += renderEnergyIcon(player, font, posX, color, TOOL_ICON, hand, showToolPercent);
         }
@@ -109,10 +109,8 @@ public class HUDRenderer {
                                  Predicate<Item> showPercent) {
         ItemStack stack = player.getItemStackFromSlot(slot);
         if (showPercent.test(stack.getItem())) {
-            if (stack.getItem() instanceof IEnergizedItem item) {
-                renderHUDElement(font, posX, 0,  ModuleHelper.get().hudElementPercent(icon, item.getEnergyRatio(stack)), color, false);
-                return 48;
-            }
+            renderHUDElement(font, posX, 0, ModuleHelper.get().hudElementPercent(icon, StorageUtils.getEnergyRatio(stack)), color, false);
+            return 48;
         }
         return 0;
     }
@@ -122,7 +120,7 @@ public class HUDRenderer {
         int startX = screenWidth - 10;
         int curY = screenHeight - 10;
         GlStateManager.pushMatrix();
-        for (EntityEquipmentSlot type : EQUIPMENT_ORDER){
+        for (EntityEquipmentSlot type : EQUIPMENT_ORDER) {
             ItemStack stack = player.getItemStackFromSlot(type);
             if (stack.getItem() instanceof IModuleContainerItem item) {
                 for (IHUDElement element : item.getHUDElements(player, stack)) {

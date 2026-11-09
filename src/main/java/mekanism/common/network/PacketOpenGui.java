@@ -8,6 +8,7 @@ import mekanism.common.network.PacketOpenGui.OpenGui;
 import net.minecraft.client.gui.GuiScreen;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.inventory.Container;
 import net.minecraft.world.World;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
@@ -17,19 +18,35 @@ import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 
 import static mekanism.common.network.PacketSimpleGui.handlers;
+import static mekanism.common.network.PacketSimpleGui.hasGuiHandler;
 
 public class PacketOpenGui implements IMessageHandler<OpenGui, IMessage> {
 
+    private static final int CORE_GUI_HANDLER = 0;
+    private static final int MODULE_TWEAKER_GUI = 77;
 
     @Override
     public IMessage onMessage(OpenGui message, MessageContext context) {
         EntityPlayer player = PacketHandler.getPlayer(context);
+        if (player == null) {
+            return null;
+        }
         PacketHandler.handlePacket(() -> {
             if (!player.world.isRemote) {
-                OpenGui.openServerGui(message.guiHandler, message.guiId, (EntityPlayerMP) player, player.world, message.coord4D);
+                // The only client-initiated OpenGui request is the item-independent module tweaker.
+                // Block and entity GUIs are opened by the server through Forge's GUI handler.
+                if (message.guiHandler == CORE_GUI_HANDLER && message.guiId == MODULE_TWEAKER_GUI) {
+                    OpenGui.openServerGui(message.guiHandler, message.guiId, (EntityPlayerMP) player, player.world,
+                            Coord4D.get(player));
+                }
             } else {
-                FMLCommonHandler.instance().showGuiScreen(OpenGui.getGui(message.guiHandler, message.guiId, player, player.world, message.coord4D));
-                player.openContainer.windowId = message.windowId;
+                GuiScreen gui = OpenGui.getGui(message.guiHandler, message.guiId, player, player.world, message.coord4D);
+                if (gui != null) {
+                    FMLCommonHandler.instance().showGuiScreen(gui);
+                    if (player.openContainer != null) {
+                        player.openContainer.windowId = message.windowId;
+                    }
+                }
             }
         }, player);
         return null;
@@ -63,11 +80,18 @@ public class PacketOpenGui implements IMessageHandler<OpenGui, IMessage> {
 
 
         public static void openServerGui(int handler, int id, EntityPlayerMP playerMP, World world, Coord4D obj) {
+            if (!hasGuiHandler(handler)) {
+                return;
+            }
             playerMP.closeContainer();
+            Container container = handlers.get(handler).getServerGui(id, playerMP, world, playerMP.getPosition());
+            if (container == null) {
+                return;
+            }
             playerMP.getNextWindowId();
             int window = playerMP.currentWindowId;
             Mekanism.packetHandler.sendTo(new OpenGui(obj, handler, id, window), playerMP);
-            playerMP.openContainer = handlers.get(handler).getServerGui(id, playerMP, world, playerMP.getPosition());
+            playerMP.openContainer = container;
             playerMP.openContainer.windowId = window;
             playerMP.openContainer.addListener(playerMP);
 
@@ -75,6 +99,9 @@ public class PacketOpenGui implements IMessageHandler<OpenGui, IMessage> {
 
         @SideOnly(Side.CLIENT)
         public static GuiScreen getGui(int handler, int id, EntityPlayer player, World world, Coord4D obj) {
+            if (!hasGuiHandler(handler)) {
+                return null;
+            }
             return (GuiScreen) handlers.get(handler).getClientGui(id, player, world, obj.getPos());
         }
 

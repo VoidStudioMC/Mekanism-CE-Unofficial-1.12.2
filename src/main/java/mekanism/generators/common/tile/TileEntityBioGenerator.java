@@ -1,88 +1,86 @@
 package mekanism.generators.common.tile;
 
 import io.netty.buffer.ByteBuf;
-import mekanism.api.TileNetworkList;
-import mekanism.common.FluidSlot;
+import mekanism.api.*;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismItems;
-import mekanism.common.base.*;
+import mekanism.common.base.IComparatorSupport;
+import mekanism.common.base.ISpecialSelectionWireframeTile;
+import mekanism.common.base.ISustainedData;
+import mekanism.common.capabilities.fluid.BasicFluidTank;
+import mekanism.common.capabilities.holder.fluid.FluidTankHelper;
+import mekanism.common.capabilities.holder.fluid.IFluidTankHolder;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.util.*;
-import net.minecraft.inventory.Container;
+import mekanism.common.inventory.container.slot.SlotOverlay;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
+import mekanism.common.util.ItemDataUtils;
+import mekanism.common.util.MekanismUtils;
+import mekanism.common.util.TileUtils;
+import mekanism.generators.common.slot.FluidFuelInventorySlot;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.network.play.server.SPacketUpdateTileEntity;
-import net.minecraft.server.management.PlayerChunkMapEntry;
 import net.minecraft.util.EnumFacing;
-import net.minecraft.world.WorldServer;
-import net.minecraftforge.common.capabilities.Capability;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.IBlockAccess;
+import net.minecraftforge.fluids.Fluid;
 import net.minecraftforge.fluids.FluidRegistry;
 import net.minecraftforge.fluids.FluidStack;
-import net.minecraftforge.fluids.FluidTankInfo;
-import net.minecraftforge.fluids.FluidUtil;
-import net.minecraftforge.fluids.capability.CapabilityFluidHandler;
-import net.minecraftforge.fluids.capability.IFluidHandler;
 import net.minecraftforge.fml.common.FMLCommonHandler;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
 
-public class TileEntityBioGenerator extends TileEntityGenerator implements IFluidHandlerWrapper, ISustainedData, IComparatorSupport, IMachineSlotTip {
+public class TileEntityBioGenerator extends TileEntityGenerator implements ISustainedData, IComparatorSupport, ISpecialSelectionWireframeTile {
 
     private static final String[] methods = new String[]{"getEnergy", "getOutput", "getMaxEnergy", "getEnergyNeeded", "getBioFuel", "getBioFuelNeeded"};
-    private static FluidTankInfo[] ALL_TANKS = new FluidTankInfo[0];
-    /**
-     * The FluidSlot biofuel instance for this generator.
-     */
-    public FluidSlot bioFuelSlot = new FluidSlot(24000, -1);
-    private int lastBioFuelAmount;
+    private static final int TANK_CAPACITY = 24000;
+    public static final int RENDER_STAGES = 40;
+    private static final ISpecialSelectionWireframeTile.SelectionTransform[] SELECTION_ROTATE_180 = {
+            ISpecialSelectionWireframeTile.SelectionTransform.rotateY(180.0D, 0.5D, 0.5D, 0.5D)
+    };
+    public BasicFluidTank bioFuelTank;
+    private int lastBioFuelRenderLevel = -1;
     private int currentRedstoneLevel;
-    public int updateDelay;
-    public boolean needsPacket;
+    private boolean activeChanged;
+    private FluidFuelInventorySlot fuelSlot;
+    private EnergyInventorySlot energySlot;
 
     public TileEntityBioGenerator() {
         super("bio", "BioGenerator", MekanismConfig.current().generators.bioGeneratorStorage.val(), MekanismConfig.current().generators.bioGeneration.val() * 2);
-        inventory = NonNullListSynchronized.withSize(2, ItemStack.EMPTY);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IFluidTankHolder getInitialFluidTanks(IContentsListener listener) {
+        FluidTankHelper builder = createFluidTankHelper();
+        bioFuelTank = builder.addTank(BasicFluidTank.input(TANK_CAPACITY, TileEntityBioGenerator::isBioFuel, listener),
+                RelativeSide.LEFT, RelativeSide.RIGHT, RelativeSide.BACK, RelativeSide.TOP, RelativeSide.BOTTOM);
+        return builder.build();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        fuelSlot = builder.addSlot(FluidFuelInventorySlot.forFuel(bioFuelTank, this::getFuel, TileEntityBioGenerator::getBioFuelStack, listener, 17, 35),
+                RelativeSide.FRONT, RelativeSide.LEFT, RelativeSide.BACK, RelativeSide.TOP, RelativeSide.BOTTOM);
+        fuelSlot.setSlotOverlay(SlotOverlay.MINUS);
+        energySlot = builder.addSlot(EnergyInventorySlot.drain(this, listener, 143, 35), RelativeSide.RIGHT);
+        return builder.build();
     }
 
     @Override
     public void onAsyncUpdateServer() {
         super.onAsyncUpdateServer();
-        if (updateDelay > 0) {
-            updateDelay--;
-            if (updateDelay == 0) {
-                needsPacket = true;
-            }
-        }
-        ChargeUtils.charge(1, this);
-        if (!inventory.get(0).isEmpty()) {
-            FluidStack fluid = FluidUtil.getFluidContained(inventory.get(0));
-            if (fluid != null && FluidRegistry.isFluidRegistered("bioethanol")) {
-                if (fluid.getFluid() == FluidRegistry.getFluid("bioethanol")) {
-                    IFluidHandler handler = FluidUtil.getFluidHandler(inventory.get(0));
-                    FluidStack drained = handler.drain(bioFuelSlot.MAX_FLUID - bioFuelSlot.fluidStored, true);
-                    if (drained != null) {
-                        bioFuelSlot.fluidStored += drained.amount;
-                    }
-                }
-            } else {
-                int fuel = getFuel(inventory.get(0));
-                if (fuel > 0) {
-                    int fuelNeeded = bioFuelSlot.MAX_FLUID - bioFuelSlot.fluidStored;
-                    if (fuel <= fuelNeeded) {
-                        bioFuelSlot.fluidStored += fuel;
-                        if (!inventory.get(0).getItem().getContainerItem(inventory.get(0)).isEmpty()) {
-                            inventory.set(0, inventory.get(0).getItem().getContainerItem(inventory.get(0)));
-                        } else {
-                            inventory.get(0).shrink(1);
-                        }
-                    }
-                }
-            }
-        }
+        energySlot.drainContainer();
+        fuelSlot.fillOrBurn();
         if (canOperate()) {
             setActive(true);
-            bioFuelSlot.setFluid(bioFuelSlot.fluidStored - 1);
-            setEnergy(electricityStored.get() + MekanismConfig.current().generators.bioGeneration.val());
+            MekanismUtils.logMismatchedStackSize(bioFuelTank.shrinkStack(1, Action.EXECUTE), 1);
+            getEnergyContainer().insert(MekanismConfig.current().generators.bioGeneration.val(), Action.EXECUTE, AutomationType.INTERNAL);
         } else {
             setActive(false);
         }
@@ -91,67 +89,76 @@ public class TileEntityBioGenerator extends TileEntityGenerator implements IFlui
             updateComparatorOutputLevelSync();
             currentRedstoneLevel = newRedstoneLevel;
         }
-        if (needsPacket) {
+        int renderLevel = bioFuelTank.isEmpty() ? -1 : getScaledFuelLevel(RENDER_STAGES - 1);
+        if (activeChanged || renderLevel != lastBioFuelRenderLevel) {
             Mekanism.packetHandler.sendUpdatePacket(this);
         }
-        needsPacket = false;
-        if (lastBioFuelAmount != bioFuelSlot.fluidStored) {
-            SPacketUpdateTileEntity packet = this.getUpdatePacket();
-            PlayerChunkMapEntry trackingEntry = ((WorldServer) this.world).getPlayerChunkMap().getEntry(this.pos.getX() >> 4, this.pos.getZ() >> 4);
-            if (trackingEntry != null) {
-                trackingEntry.getWatchingPlayers().forEach(player -> player.connection.sendPacket(packet));
-            }
-        }
-        lastBioFuelAmount = bioFuelSlot.fluidStored;
-    }
-
-    @Override
-    public void onUpdateClient() {
-        if (updateDelay > 0) {
-            updateDelay--;
-            if (updateDelay == 0) {
-                MekanismUtils.updateBlock(world, getPos());
-            }
-        }
-    }
-
-    @Override
-    public boolean isItemValidForSlot(int slotID, @Nonnull ItemStack itemstack) {
-        if (slotID == 0) {
-            if (getFuel(itemstack) > 0) {
-                return true;
-            } else if (FluidRegistry.isFluidRegistered("bioethanol")) {
-                FluidStack fluidContained = FluidUtil.getFluidContained(itemstack);
-                if (fluidContained != null) {
-                    return fluidContained.getFluid() == FluidRegistry.getFluid("bioethanol");
-                }
-            }
-            return false;
-        } else if (slotID == 1) {
-            return ChargeUtils.canBeCharged(itemstack);
-        }
-        return true;
+        activeChanged = false;
+        lastBioFuelRenderLevel = renderLevel;
     }
 
     @Override
     public boolean canOperate() {
-        return electricityStored.get() < BASE_MAX_ENERGY && bioFuelSlot.fluidStored > 0 && MekanismUtils.canFunction(this);
+        return MekanismUtils.canFunction(this) && !bioFuelTank.isEmpty()
+                && getEnergyContainer().insert(MekanismConfig.current().generators.bioGeneration.val(), Action.SIMULATE, AutomationType.INTERNAL) == 0;
+    }
+
+    @Override
+    protected boolean supportsAsyncIdleSkipping() {
+        return getClass() == TileEntityBioGenerator.class;
+    }
+
+    @Override
+    protected boolean isAsyncUpdateIdle() {
+        return bioFuelTank.isEmpty() && fuelSlot.isEmpty() && energySlot.isEmpty() && !getActive() &&
+                !activeChanged && lastBioFuelRenderLevel == -1 && currentRedstoneLevel == getRedstoneLevel();
     }
 
     @Override
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
-        bioFuelSlot.fluidStored = nbtTags.getInteger("bioFuelStored");
+        if (!hasStoredFluidTanks(nbtTags) && nbtTags.hasKey("bioFuelTank")) {
+            bioFuelTank.readFromNBT(nbtTags.getCompoundTag("bioFuelTank"));
+        } else if (nbtTags.hasKey("bioFuelStored")) {
+            setBioFuel(nbtTags.getInteger("bioFuelStored"));
+        }
+        sanitizeBioFuelTank();
     }
 
     @Override
     public void writeCustomNBT(NBTTagCompound nbtTags) {
         super.writeCustomNBT(nbtTags);
-        nbtTags.setInteger("bioFuelStored", bioFuelSlot.fluidStored);
     }
 
     public int getFuel(ItemStack itemstack) {
         return itemstack.getItem() == MekanismItems.BioFuel ? 200 : 0;
+    }
+
+    public static boolean isBioFuel(FluidStack stack) {
+        return stack != null && isBioFuel(stack.getFluid());
+    }
+
+    public static boolean isBioFuel(Fluid fluid) {
+        return fluid != null && fluid == FluidRegistry.getFluid("bioethanol");
+    }
+
+    private static FluidStack getBioFuelStack(int amount) {
+        return new FluidStack(FluidRegistry.getFluid("bioethanol"), amount);
+    }
+
+    private void setBioFuel(int amount) {
+        int clamped = Math.max(Math.min(amount, bioFuelTank.getCapacity()), 0);
+        if (clamped == 0) {
+            bioFuelTank.setEmpty();
+            return;
+        }
+        FluidStack bioFuel = getBioFuelStack(clamped);
+        if (bioFuelTank.isFluidEqual(bioFuel)) {
+            bioFuelTank.setStackSize(clamped, Action.EXECUTE);
+        } else {
+            bioFuelTank.setEmpty();
+            bioFuelTank.insert(bioFuel, Action.EXECUTE, AutomationType.INTERNAL);
+        }
     }
 
     /**
@@ -161,13 +168,7 @@ public class TileEntityBioGenerator extends TileEntityGenerator implements IFlui
      * @return Scaled fuel level
      */
     public int getScaledFuelLevel(int i) {
-        return bioFuelSlot.fluidStored * i / bioFuelSlot.MAX_FLUID;
-    }
-
-    @Nonnull
-    @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return side == MekanismUtils.getRight(facing) ? new int[]{1} : new int[]{0};
+        return bioFuelTank.getFluidAmount() * i / bioFuelTank.getCapacity();
     }
 
     @Override
@@ -179,27 +180,23 @@ public class TileEntityBioGenerator extends TileEntityGenerator implements IFlui
     public void handlePacketData(ByteBuf dataStream) {
         super.handlePacketData(dataStream);
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
-            bioFuelSlot.fluidStored = dataStream.readInt();
-            if (updateDelay == 0) {
-                updateDelay = MekanismConfig.current().general.UPDATE_DELAY.val();
-                MekanismUtils.updateBlock(world, getPos());
-            }
+            TileUtils.readTankData(dataStream, bioFuelTank);
+            MekanismUtils.updateBlock(world, getPos());
         }
     }
 
     @Override
     public void setActive(boolean active) {
-        super.setActive(active);
-        if (updateDelay == 0) {
-            Mekanism.packetHandler.sendUpdatePacket(this);
-            updateDelay = 10;
+        if (isActive != active) {
+            isActive = active;
+            activeChanged = true;
         }
     }
 
     @Override
     public TileNetworkList getNetworkedData(TileNetworkList data) {
         super.getNetworkedData(data);
-        data.add(bioFuelSlot.fluidStored);
+        TileUtils.addTankData(data, bioFuelTank);
         return data;
     }
 
@@ -215,77 +212,57 @@ public class TileEntityBioGenerator extends TileEntityGenerator implements IFlui
             case 1 -> new Object[]{output};
             case 2 -> new Object[]{BASE_MAX_ENERGY};
             case 3 -> new Object[]{BASE_MAX_ENERGY - electricityStored.get()};
-            case 4 -> new Object[]{bioFuelSlot.fluidStored};
-            case 5 -> new Object[]{bioFuelSlot.MAX_FLUID - bioFuelSlot.fluidStored};
+            case 4 -> new Object[]{bioFuelTank.getFluidAmount()};
+            case 5 -> new Object[]{bioFuelTank.getNeeded()};
             default -> throw new NoSuchMethodException();
         };
     }
 
     @Override
-    public int fill(EnumFacing from, @Nonnull FluidStack resource, boolean doFill) {
-        int fuelNeeded = bioFuelSlot.MAX_FLUID - bioFuelSlot.fluidStored;
-        int fuelTransfer = Math.min(resource.amount, fuelNeeded);
-        if (doFill) {
-            bioFuelSlot.setFluid(bioFuelSlot.fluidStored + fuelTransfer);
-        }
-        return fuelTransfer;
-    }
-
-    @Override
-    public boolean canFill(EnumFacing from, @Nonnull FluidStack fluid) {
-        return from != facing && fluid.getFluid() == FluidRegistry.getFluid("bioethanol");
-    }
-
-    @Override
-    public FluidTankInfo[] getTankInfo(EnumFacing from) {
-        return PipeUtils.EMPTY;
-    }
-
-    @Override
     public void writeSustainedData(ItemStack itemStack) {
-        ItemDataUtils.setInt(itemStack, "fluidStored", bioFuelSlot.fluidStored);
+        writeSustainedFluidTanks(itemStack);
+        ItemDataUtils.setLegacyFluidTank(itemStack, "bioFuelTank", bioFuelTank);
     }
 
     @Override
     public void readSustainedData(ItemStack itemStack) {
-        bioFuelSlot.setFluid(ItemDataUtils.getInt(itemStack, "fluidStored"));
-    }
-
-    @Override
-    public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing side) {
-        return (side != facing && capability == CapabilityFluidHandler.FLUID_HANDLER_CAPABILITY) || super.hasCapability(capability, side);
-    }
-
-    @Override
-    public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing side) {
-        if (side != facing && capability == CapabilityFluidHandler.FLUID_HANDLER_CAPABILITY) {
-            return CapabilityFluidHandler.FLUID_HANDLER_CAPABILITY.cast(new FluidHandlerWrapper(this, side));
+        if (readSustainedFluidTanks(itemStack)) {
+            return;
+        } else if (ItemDataUtils.readLegacyFluidTank(itemStack, "bioFuelTank", bioFuelTank)) {
+            return;
+        } else if (ItemDataUtils.hasData(itemStack, "fluidStored")) {
+            setBioFuel(ItemDataUtils.getInt(itemStack, "fluidStored"));
         }
-        return super.getCapability(capability, side);
+        sanitizeBioFuelTank();
+    }
+
+    private void sanitizeBioFuelTank() {
+        FluidStack stored = bioFuelTank.getFluid();
+        if (stored != null && (stored.amount <= 0 || !isBioFuel(stored.getFluid()))) {
+            bioFuelTank.setEmpty();
+        } else if (stored != null) {
+            bioFuelTank.setStackSize(stored.amount, Action.EXECUTE);
+        }
     }
 
     @Override
-    public FluidTankInfo[] getAllTanks() {
-        return ALL_TANKS;
+    public boolean isComparatorInput(mekanism.api.transmitters.TransmissionType type) {
+        return type == mekanism.api.transmitters.TransmissionType.FLUID;
     }
 
     @Override
     public int getRedstoneLevel() {
-        return Container.calcRedstoneFromInventory(this);
+        return MekanismUtils.redstoneLevelFromContents(bioFuelTank.getFluidAmount(), bioFuelTank.getCapacity());
     }
 
     @Override
-    public boolean getEnergySlot() {
-        return inventory.get(1).isEmpty();
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.generators.client.model.ModelBioGenerator.class;
     }
 
     @Override
-    public boolean getInputSlot() {
-        return false;
-    }
-
-    @Override
-    public boolean getOuputSlot() {
-        return false;
+    public ISpecialSelectionWireframeTile.SelectionTransform[] getSelectionWireframeTransforms(IBlockState state, IBlockAccess world, BlockPos pos) {
+        return SELECTION_ROTATE_180;
     }
 }

@@ -159,7 +159,9 @@ public final class NBTConstants {
     public static final String OWNER_UUID = "owner";
     public static final String PARTIAL_WASTE = "partialWaste";
     public static final String PATH_TYPE = "pathType";
-    /** @since 10.4.0 */
+    /**
+     * @since 10.4.0
+     */
     public static final String PERSONAL_STORAGE_ID = "personalStorageId";
     public static final String PICKUP_DROPS = "dropPickup";
     public static final String PIGMENT_NAME = "pigmentName";
@@ -174,7 +176,9 @@ public final class NBTConstants {
     public static final String PULSE = "pulse";
     public static final String SKIN = "skin";
     public static final String QIO_ITEM_MAP = "qioItemMap";
+    public static final String QIO_DRIVE_ID = "qioDriveId";
     public static final String QIO_META_COUNT = "qioMetaCount";
+    public static final String QIO_META_STORAGE_UNITS = "qioMetaStorageUnits";
     public static final String QIO_META_TYPES = "qioMetaTypes";
     public static final String RADIATION = "radiation";
     public static final String RADIATION_LIST = "radList";

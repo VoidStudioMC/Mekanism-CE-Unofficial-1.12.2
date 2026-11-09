@@ -8,7 +8,6 @@ import mekanism.common.base.IUpgradeTile;
 import mekanism.common.network.PacketRemoveUpgrade.RemoveUpgradeMessage;
 import mekanism.common.tile.prefab.TileEntityBasicBlock;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessageHandler;
@@ -19,22 +18,21 @@ public class PacketRemoveUpgrade implements IMessageHandler<RemoveUpgradeMessage
     @Override
     public IMessage onMessage(RemoveUpgradeMessage message, MessageContext context) {
         EntityPlayer player = PacketHandler.getPlayer(context);
+        if (player == null) {
+            return null;
+        }
         PacketHandler.handlePacket(() -> {
             TileEntity tileEntity = message.coord4D.getTileEntity(player.world);
+            if (!PacketHandler.canAccessTile(player, tileEntity)) {
+                return;
+            }
             if (tileEntity instanceof IUpgradeTile upgradeTile && tileEntity instanceof TileEntityBasicBlock) {
-                Upgrade upgrade = Upgrade.values()[message.upgradeType];
-                if (upgradeTile.getComponent().getUpgrades(upgrade) > 0) {
-                    ItemStack up = upgrade.getStack();
-                    up.setCount(upgradeTile.getComponent().getUpgrades(upgrade));
-                    if (message.removeAll == 1) {
-                        if (player.inventory.addItemStackToInventory(up)) {
-                            upgradeTile.getComponent().removeUpgrade(upgrade, true);
-                        }
-                    } else {
-                        if (player.inventory.addItemStackToInventory(upgrade.getStack())) {
-                            upgradeTile.getComponent().removeUpgrade(upgrade, false);
-                        }
-                    }
+                Upgrade upgrade = Upgrade.byName(message.upgradeType);
+                if (upgrade == null) {
+                    return;
+                }
+                if (upgradeTile.isUpgradeInstalled(upgrade)) {
+                    upgradeTile.removeInstalledUpgrade(upgrade, message.removeAll);
                 }
             }
         }, player);
@@ -44,30 +42,30 @@ public class PacketRemoveUpgrade implements IMessageHandler<RemoveUpgradeMessage
 
     public static class RemoveUpgradeMessage implements IMessage {
         public Coord4D coord4D;
-        public int upgradeType;
-        public int removeAll;
+        public String upgradeType;
+        public boolean removeAll;
 
         public RemoveUpgradeMessage() {
         }
 
-        public RemoveUpgradeMessage(Coord4D coord, int type, int remove) {
+        public RemoveUpgradeMessage(Coord4D coord, Upgrade type, boolean remove) {
             coord4D = coord;
-            upgradeType = type;
+            upgradeType = type.getRegistryNameString();
             removeAll = remove;
         }
 
         @Override
         public void toBytes(ByteBuf dataStream) {
             coord4D.write(dataStream);
-            dataStream.writeInt(upgradeType);
-            dataStream.writeInt(removeAll);
+            PacketHandler.writeString(dataStream, upgradeType);
+            dataStream.writeBoolean(removeAll);
         }
 
         @Override
         public void fromBytes(ByteBuf dataStream) {
             coord4D = Coord4D.read(dataStream);
-            upgradeType = dataStream.readInt();
-            removeAll = dataStream.readInt();
+            upgradeType = PacketHandler.readString(dataStream);
+            removeAll = dataStream.readBoolean();
         }
     }
 }

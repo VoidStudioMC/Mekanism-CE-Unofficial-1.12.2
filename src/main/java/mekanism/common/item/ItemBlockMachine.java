@@ -3,37 +3,45 @@ package mekanism.common.item;
 import cofh.redstoneflux.api.IEnergyContainerItem;
 import ic2.api.item.IElectricItemManager;
 import ic2.api.item.ISpecialElectricItem;
+import mekanism.api.Action;
 import mekanism.api.Coord4D;
 import mekanism.api.EnumColor;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.NBTConstants;
+import mekanism.api.fluid.IExtendedFluidTank;
+import mekanism.api.fluid.IMekanismFluidHandler;
+import mekanism.api.functions.ConstantPredicates;
 import mekanism.client.MekKeyHandler;
 import mekanism.client.MekanismClient;
 import mekanism.client.MekanismKeyHandler;
-import mekanism.common.Mekanism;
 import mekanism.common.Upgrade;
-import mekanism.common.base.*;
-import mekanism.common.base.IRedstoneControl.RedstoneControl;
+import mekanism.common.base.FactoryRecipeTypeCodec;
+import mekanism.common.base.IFactory;
+import mekanism.common.base.ISustainedTank;
+import mekanism.common.base.ITierItem;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.capabilities.ItemCapabilityWrapper;
+import mekanism.common.capabilities.energy.BasicEnergyContainer;
+import mekanism.common.capabilities.energy.item.RateLimitEnergyHandler;
+import mekanism.common.capabilities.fluid.item.RateLimitFluidHandler;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.frequency.Frequency;
+import mekanism.common.frequency.Frequency.FrequencyIdentity;
+import mekanism.common.frequency.FrequencyType;
 import mekanism.common.integration.MekanismHooks;
 import mekanism.common.integration.forgeenergy.ForgeEnergyItemWrapper;
 import mekanism.common.integration.ic2.IC2ItemManager;
 import mekanism.common.integration.redstoneflux.RFIntegration;
 import mekanism.common.integration.tesla.TeslaItemWrapper;
+import mekanism.common.item.interfaces.IItemBlockPlacementData;
+import mekanism.common.item.interfaces.IItemSustainedInventory;
+import mekanism.common.item.interfaces.ILegacyEnergizedItem;
 import mekanism.common.item.interfaces.IModeItem;
 import mekanism.common.security.ISecurityItem;
-import mekanism.common.security.ISecurityTile;
 import mekanism.common.security.ISecurityTile.SecurityMode;
 import mekanism.common.tier.BaseTier;
-import mekanism.common.tier.FactoryTier;
 import mekanism.common.tier.FluidTankTier;
 import mekanism.common.tile.TileEntityFluidTank;
 import mekanism.common.tile.TileEntityQuantumEntangloporter;
 import mekanism.common.tile.factory.TileEntityFactory;
-import mekanism.common.tile.prefab.TileEntityBasicBlock;
-import mekanism.common.tile.prefab.TileEntityElectricBlock;
 import mekanism.common.util.*;
 import net.minecraft.block.Block;
 import net.minecraft.block.material.Material;
@@ -41,6 +49,7 @@ import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.util.ITooltipFlag;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.SoundEvents;
 import net.minecraft.inventory.EntityEquipmentSlot;
@@ -48,11 +57,13 @@ import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.nbt.NBTTagList;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.*;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.RayTraceResult;
 import net.minecraft.util.text.ITextComponent;
+import net.minecraft.util.text.TextComponentString;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.World;
 import net.minecraftforge.common.capabilities.Capability;
@@ -61,6 +72,7 @@ import net.minecraftforge.fluids.Fluid;
 import net.minecraftforge.fluids.FluidRegistry;
 import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fluids.capability.CapabilityFluidHandler;
+import net.minecraftforge.fluids.capability.IFluidHandlerItem;
 import net.minecraftforge.fml.common.Optional.Interface;
 import net.minecraftforge.fml.common.Optional.InterfaceList;
 import net.minecraftforge.fml.common.Optional.Method;
@@ -123,8 +135,8 @@ import java.util.UUID;
         @Interface(iface = "cofh.redstoneflux.api.IEnergyContainerItem", modid = MekanismHooks.REDSTONEFLUX_MOD_ID),
         @Interface(iface = "ic2.api.item.ISpecialElectricItem", modid = MekanismHooks.IC2_MOD_ID)
 })
-public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpecialElectricItem, IFactory, ISustainedInventory, ISustainedTank, IEnergyContainerItem,
-        IFluidItemWrapper, ITierItem, ISecurityItem, IModeItem {
+public class ItemBlockMachine extends ItemBlock implements ILegacyEnergizedItem, ISpecialElectricItem, IFactory, IItemSustainedInventory, ISustainedTank, IEnergyContainerItem,
+        ITierItem, ISecurityItem, IModeItem, IItemBlockPlacementData {
 
     public Block metaBlock;
 
@@ -139,6 +151,14 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public int getMetadata(int i) {
         return i;
+    }
+
+    @Override
+    public int getItemStackLimit(ItemStack stack) {
+        if (MachineType.get(stack) == MachineType.PERSONAL_CHEST && getOwnerUUID(stack) != null) {
+            return 1;
+        }
+        return super.getItemStackLimit(stack);
     }
 
     @Nonnull
@@ -162,6 +182,9 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public String getItemStackDisplayName(@Nonnull ItemStack itemstack) {
         MachineType type = MachineType.get(itemstack);
+        if (type == null) {
+            return super.getItemStackDisplayName(itemstack);
+        }
         if (type.isFactory()) {
             BaseTier tier = type.factoryTier.getBaseTier();
             RecipeType recipeType = getRecipeTypeOrNull(itemstack);
@@ -199,11 +222,12 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
                 }
 
                 if (type == MachineType.QUANTUM_ENTANGLOPORTER) {
-                    Frequency.Identity freq = Frequency.Identity.load(ItemDataUtils.getCompound(itemstack, "entangleporter_frequency"));
+                    FrequencyIdentity freq = getStoredInventoryFrequency(itemstack);
                     if (freq != null) {
-                        list.add(EnumColor.INDIGO + LangUtils.localize("gui.frequency") + ": " + EnumColor.GREY + freq.name);
+                        list.add(EnumColor.INDIGO + LangUtils.localize("gui.frequency") + ": " + EnumColor.GREY + freq.key());
 
-                        list.add(EnumColor.INDIGO + LangUtils.localize("gui.mode") + ": " + EnumColor.GREY + LangUtils.localize("gui." + (!freq.publicFreq ? "private" : "public")));
+                        list.add(EnumColor.INDIGO + LangUtils.localize("gui.mode") + ": " + EnumColor.GREY +
+                                LangUtils.localize("gui." + (freq.securityMode() == SecurityMode.PRIVATE ? "private" : "public")));
                     }
                 }
 
@@ -231,7 +255,7 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
                 }
 
                 if (type.isElectric && itemstack.getCount() <= 1) {
-                    list.add(EnumColor.BRIGHT_GREEN + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(getEnergy(itemstack), getMaxEnergy(itemstack)));
+                    list.add(EnumColor.BRIGHT_GREEN + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(StorageUtils.getStoredEnergy(itemstack), getEnergyCapacity(itemstack)));
                 }
 
                 if (hasTank(itemstack) && type != MachineType.FLUID_TANK) {
@@ -246,8 +270,8 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
                     list.add(EnumColor.AQUA + LangUtils.localize("tooltip.inventory") + ": " + EnumColor.GREY +
                             LangUtils.transYesNo(getInventory(itemstack) != null && getInventory(itemstack).tagCount() != 0));
                 }
-                if (type.supportsUpgrades && ItemDataUtils.hasData(itemstack, "upgrades")) {
-                    Upgrade.buildMap(ItemDataUtils.getDataMap(itemstack)).forEach((key, value) -> list.add(key.getColor() + "- " + key.getName() + (key.canMultiply() ? ": " + EnumColor.GREY + "x" + value : "")));
+                if (type.supportsUpgrades && Upgrade.hasUpgradeData(ItemDataUtils.getDataMapIfPresent(itemstack))) {
+                    Upgrade.buildComponentMap(ItemDataUtils.getDataMapIfPresent(itemstack)).forEach((key, value) -> list.add(key.getColor() + "- " + key.getName() + (key.canMultiply() ? ": " + EnumColor.GREY + "x" + value : "")));
                 }
             } else {
                 list.addAll(MekanismUtils.splitTooltip(type.getDescription(), itemstack));
@@ -257,118 +281,118 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
 
     @Nonnull
     @Override
+    public EnumActionResult onItemUseFirst(EntityPlayer player, World world, @Nonnull BlockPos pos, @Nonnull EnumFacing side,
+                                           float hitX, float hitY, float hitZ, @Nonnull EnumHand hand) {
+        ItemStack stack = player.getHeldItem(hand);
+        if (MachineType.get(stack) == MachineType.PERSONAL_CHEST && tryClaimPersonalChest(world, player, stack)) {
+            //Claiming the chest consumes this click. The next click can place it or open its GUI.
+            return EnumActionResult.SUCCESS;
+        }
+        return EnumActionResult.PASS;
+    }
+
+    @Nonnull
+    @Override
     public EnumActionResult onItemUse(EntityPlayer player, World world, @Nonnull BlockPos pos, @Nonnull EnumHand hand, @Nonnull EnumFacing side, float hitX, float hitY, float hitZ) {
         ItemStack stack = player.getHeldItem(hand);
         MachineType type = MachineType.get(stack);
-        if (type == MachineType.FLUID_TANK && getBucketMode(stack) && stack.getCount() > 1) {
-            return EnumActionResult.PASS;
+        if (type == MachineType.PERSONAL_CHEST) {
+            if (tryClaimPersonalChest(world, player, stack)) {
+                return EnumActionResult.SUCCESS;
+            }
+            //A claimed personal chest must never be used as a shared stack, as its inventory is stack-backed.
+            if (getOwnerUUID(stack) == null || stack.getCount() > 1) {
+                return EnumActionResult.PASS;
+            }
+        }
+        if (type == MachineType.FLUID_TANK) {
+            if (getBucketMode(stack)) {
+                return EnumActionResult.PASS;
+            }
         }
         return super.onItemUse(player, world, pos, hand, side, hitX, hitY, hitZ);
     }
 
     @Override
     public boolean placeBlockAt(@Nonnull ItemStack stack, @Nonnull EntityPlayer player, World world, @Nonnull BlockPos pos, EnumFacing side, float hitX, float hitY, float hitZ, @Nonnull IBlockState state) {
-        if (stack.getCount() > 1 && MekanismConfig.current().mekce.StackingPlacementLimits.val()) {
-            return false;
-        }
         boolean place = true;
         MachineType type = MachineType.get(stack);
-        if (MekanismConfig.current().general.destroyDisabledBlocks.val()){
+        if (type == MachineType.PERSONAL_CHEST && (getOwnerUUID(stack) == null || stack.getCount() > 1)) {
+            return false;
+        }
+        if (MekanismConfig.current().general.destroyDisabledBlocks.val()) {
             if (type != null && !type.isEnabled()) {
                 return false;
             }
         }
-        if (type == MachineType.DIGITAL_MINER || type == MachineType.MODIFICATION_STATION) {
+        if (type == MachineType.DIGITAL_MINER) {
             BlockPos.MutableBlockPos testPos = new BlockPos.MutableBlockPos();
             for (int xPos = -1; xPos <= +1; xPos++) {
                 for (int yPos = 0; yPos <= +1; yPos++) {
                     for (int zPos = -1; zPos <= +1; zPos++) {
                         testPos.setPos(pos.getX() + xPos, pos.getY() + yPos, pos.getZ() + zPos);
-                        Block b = world.getBlockState(testPos).getBlock();
-                        if (!world.isValid(testPos) || !world.isBlockLoaded(testPos, false) || !b.isReplaceable(world, testPos)) {
+                        if (!MekanismUtils.isValidBoundingBlockPosition(world, testPos, pos)) {
                             place = false;
                         }
                     }
                 }
             }
+        } else if (type == MachineType.MODIFICATION_STATION) {
+            int facingIndex = MathHelper.floor((player.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
+            EnumFacing facing = switch (facingIndex) {
+                case 0 -> EnumFacing.NORTH;
+                case 1 -> EnumFacing.EAST;
+                case 2 -> EnumFacing.SOUTH;
+                case 3 -> EnumFacing.WEST;
+                default -> EnumFacing.NORTH;
+            };
+            EnumFacing right = MekanismUtils.getRight(facing);
+            place = MekanismUtils.isValidBoundingBlockPosition(world, pos.up(), pos)
+                    && MekanismUtils.isValidBoundingBlockPosition(world, pos.offset(right), pos)
+                    && MekanismUtils.isValidBoundingBlockPosition(world, pos.offset(right).up(), pos);
         } else if (type == MachineType.SOLAR_NEUTRON_ACTIVATOR || type == MachineType.SEISMIC_VIBRATOR || type == MachineType.ISOTOPIC_CENTRIFUGE) {
             BlockPos abovePos = pos.up();
-            if (!world.isValid(abovePos) || !world.getBlockState(abovePos).getBlock().isReplaceable(world, abovePos)) {
+            if (!MekanismUtils.isValidBoundingBlockPosition(world, abovePos, pos)) {
                 place = false;
             }
         }
 
-        if (place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state)) {
-            TileEntityBasicBlock tileEntity = (TileEntityBasicBlock) world.getTileEntity(pos);
-            if (tileEntity instanceof TileEntityFluidTank tile) {
-                tile.tier = FluidTankTier.values()[getBaseTier(stack).ordinal()];
-                tile.fluidTank.setCapacity(tile.tier.getStorage());
-            }
-            if (tileEntity instanceof ISecurityTile security) {
-                security.getSecurity().setOwnerUUID(getOwnerUUID(stack));
-                if (hasSecurity(stack)) {
-                    security.getSecurity().setMode(getSecurity(stack));
-                }
-                if (getOwnerUUID(stack) == null) {
-                    security.getSecurity().setOwnerUUID(player.getUniqueID());
-                }
-            }
+        return place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state);
+    }
 
-            if (tileEntity instanceof IUpgradeTile upgradeTile) {
-                if (ItemDataUtils.hasData(stack, "upgrades")) {
-                    upgradeTile.getComponent().read(ItemDataUtils.getDataMap(stack));
-                }
-            }
-
-            if (tileEntity instanceof ISideConfiguration config) {
-                if (ItemDataUtils.hasData(stack, "sideDataStored")) {
-                    config.getConfig().read(ItemDataUtils.getDataMap(stack));
-                    config.getEjector().read(ItemDataUtils.getDataMap(stack));
-                }
-            }
-
-            if (tileEntity instanceof ISustainedData data) {
-                if (stack.getTagCompound() != null) {
-                    data.readSustainedData(stack);
-                }
-            }
-
-            if (tileEntity instanceof IRedstoneControl redstoneControl) {
-                if (ItemDataUtils.hasData(stack, "controlType")) {
-                    redstoneControl.setControlType(RedstoneControl.values()[ItemDataUtils.getInt(stack, "controlType")]);
-                }
-            }
-
-            if (tileEntity instanceof TileEntityFactory factory) {
-                RecipeType recipeType = getRecipeTypeOrNull(stack);
-                if (recipeType != null) {
-                    factory.setRecipeType(recipeType);
-                }
-
-                world.notifyNeighborsOfStateChange(pos, tileEntity.getBlockType(), true);
-                Mekanism.packetHandler.sendUpdatePacket(tileEntity);
-            }
-
-            if (tileEntity instanceof ISustainedTank tank) {
-                if (hasTank(stack) && getFluidStack(stack) != null) {
-                    tank.setFluidStack(getFluidStack(stack));
-                }
-            }
-            if (tileEntity instanceof ISustainedInventory inventory) {
-                inventory.setInventory(getInventory(stack));
-            }
-            if (tileEntity instanceof TileEntityElectricBlock entityElectricBlock) {
-                entityElectricBlock.electricityStored.set(getEnergy(stack));
-            }
-            if (!world.isRemote && tileEntity instanceof TileEntityQuantumEntangloporter quantum && ItemDataUtils.hasData(stack, "entangleporter_frequency")) {
-                Frequency.Identity freq = Frequency.Identity.load(ItemDataUtils.getCompound(stack, "entangleporter_frequency"));
-                if (freq != null) {
-                    quantum.setFrequency(freq.name, freq.publicFreq);
-                }
-            }
-            return true;
+    @Override
+    public void restorePlacementData(@Nonnull ItemStack stack, @Nonnull EntityLivingBase placer, @Nonnull World world, @Nonnull BlockPos pos,
+                                     @Nonnull TileEntity tileEntity) {
+        if (tileEntity instanceof TileEntityFluidTank tile) {
+            tile.tier = FluidTankTier.values()[getBaseTier(stack).ordinal()];
         }
-        return false;
+        if (tileEntity instanceof TileEntityFactory factory) {
+            RecipeType recipeType = getRecipeTypeOrNull(stack);
+            if (recipeType != null) {
+                factory.setRecipeType(recipeType);
+            }
+        }
+        MekanismPlacementData.restoreCommon(stack, placer, tileEntity);
+        if (world != null && tileEntity instanceof TileEntityFactory) {
+            world.notifyNeighborsOfStateChange(pos, tileEntity.getBlockType(), true);
+        }
+        if (world != null && !world.isRemote && tileEntity instanceof TileEntityQuantumEntangloporter quantum) {
+            FrequencyIdentity frequency = getStoredInventoryFrequency(stack);
+            if (frequency != null) {
+                quantum.setFrequency(frequency);
+            }
+        }
+    }
+
+    @Nullable
+    private FrequencyIdentity getStoredInventoryFrequency(ItemStack stack) {
+        if (ItemDataUtils.hasData(stack, NBTConstants.COMPONENT_FREQUENCY)) {
+            NBTTagCompound frequencyData = ItemDataUtils.getCompound(stack, NBTConstants.COMPONENT_FREQUENCY);
+            if (frequencyData.hasKey(FrequencyType.INVENTORY.getName())) {
+                return FrequencyType.INVENTORY.getIdentitySerializer().read(frequencyData.getCompoundTag(FrequencyType.INVENTORY.getName()));
+            }
+        }
+        return null;
     }
 
     public boolean tryPlaceContainedLiquid(World world, ItemStack itemstack, BlockPos pos) {
@@ -400,15 +424,16 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public ActionResult<ItemStack> onItemRightClick(World world, EntityPlayer entityplayer, @Nonnull EnumHand hand) {
         ItemStack itemstack = entityplayer.getHeldItem(hand);
+        MachineType type = MachineType.get(itemstack);
+        if (type == MachineType.PERSONAL_CHEST && tryClaimPersonalChest(world, entityplayer, itemstack)) {
+            //Claiming the chest consumes this click. The next click can open its GUI.
+            return new ActionResult<>(EnumActionResult.SUCCESS, itemstack);
+        }
         if (itemstack.getCount() > 1) {
             return new ActionResult<>(EnumActionResult.PASS, itemstack);
         }
-        MachineType type = MachineType.get(itemstack);
-        if (MachineType.get(itemstack) == MachineType.PERSONAL_CHEST) {
+        if (type == MachineType.PERSONAL_CHEST) {
             if (!world.isRemote) {
-                if (getOwnerUUID(itemstack) == null) {
-                    setOwnerUUID(itemstack, entityplayer.getUniqueID());
-                }
                 if (SecurityUtils.canAccess(entityplayer, itemstack)) {
                     MekanismUtils.openItemGui(entityplayer, hand, 19);
                 } else {
@@ -428,23 +453,21 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
                         if (!entityplayer.canPlayerEdit(coord.getPos(), pos.sideHit, itemstack)) {
                             return new ActionResult<>(EnumActionResult.FAIL, itemstack);
                         }
+                        IExtendedFluidTank fluidTank = getExtendedFluidTank(itemstack);
+                        FluidStack stored = fluidTank == null ? getFluidStack(itemstack) : fluidTank.getFluid();
                         FluidStack fluid = MekanismUtils.getFluid(world, coord, false);
-                        if (fluid != null && (getFluidStack(itemstack) == null || getFluidStack(itemstack).isFluidEqual(fluid))) {
-                            int needed = getCapacity(itemstack) - (getFluidStack(itemstack) != null ? getFluidStack(itemstack).amount : 0);
+                        if (fluid != null && (stored == null || stored.isFluidEqual(fluid))) {
+                            int storedAmount = stored == null ? 0 : stored.amount;
+                            int needed = getCapacity(itemstack) - storedAmount;
                             if (fluid.amount > needed) {
                                 return new ActionResult<>(EnumActionResult.FAIL, itemstack);
                             }
-                            if (getFluidStack(itemstack) == null) {
-                                setFluidStack(fluid, itemstack);
-                            } else {
-                                FluidStack newStack = getFluidStack(itemstack);
-                                newStack.amount += fluid.amount;
-                                setFluidStack(newStack, itemstack);
-                            }
+                            setFluidStackSize(itemstack, fluidTank, fluid, storedAmount + fluid.amount);
                             world.setBlockToAir(coord.getPos());
                         }
                     } else {
-                        FluidStack stored = getFluidStack(itemstack);
+                        IExtendedFluidTank fluidTank = getExtendedFluidTank(itemstack);
+                        FluidStack stored = fluidTank == null ? getFluidStack(itemstack) : fluidTank.getFluid();
                         if (stored == null || stored.amount < Fluid.BUCKET_VOLUME) {
                             return new ActionResult<>(EnumActionResult.FAIL, itemstack);
                         }
@@ -454,9 +477,7 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
                         }
                         if (tryPlaceContainedLiquid(world, itemstack, trans.getPos())
                                 && !entityplayer.capabilities.isCreativeMode) {
-                            FluidStack newStack = stored.copy();
-                            newStack.amount -= Fluid.BUCKET_VOLUME;
-                            setFluidStack(newStack.amount > 0 ? newStack : null, itemstack);
+                            setFluidStackSize(itemstack, fluidTank, stored, stored.amount - Fluid.BUCKET_VOLUME);
                         }
                     }
                 }
@@ -468,22 +489,30 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         return new ActionResult<>(EnumActionResult.PASS, itemstack);
     }
 
+    private boolean tryClaimPersonalChest(World world, EntityPlayer player, ItemStack stack) {
+        if (getOwnerUUID(stack) == null) {
+            if (!world.isRemote) {
+                setOwnerUUID(stack, player.getUniqueID());
+            }
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public int getRecipeType(ItemStack itemStack) {
-        if (itemStack.getTagCompound() == null) {
-            return 0;
-        }
-        return itemStack.getTagCompound().getInteger("recipeType");
+        RecipeType recipeType = getRecipeTypeOrNull(itemStack);
+        return recipeType == null ? -1 : recipeType.ordinal();
     }
 
     @Nullable
     @Override
     public RecipeType getRecipeTypeOrNull(ItemStack itemStack) {
-        int recipeType = getRecipeType(itemStack);
-        if (recipeType < RecipeType.values().length) {
-            return RecipeType.values()[recipeType];
+        NBTTagCompound nbt = itemStack.getTagCompound();
+        if (!FactoryRecipeTypeCodec.hasRecipeType(nbt)) {
+            return RecipeType.SMELTING;
         }
-        return null;
+        return FactoryRecipeTypeCodec.read(nbt);
     }
 
     @Override
@@ -491,7 +520,12 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (itemStack.getTagCompound() == null) {
             itemStack.setTagCompound(new NBTTagCompound());
         }
-        itemStack.getTagCompound().setInteger("recipeType", type);
+        RecipeType[] values = RecipeType.values();
+        if (type >= 0 && type < values.length) {
+            FactoryRecipeTypeCodec.write(itemStack.getTagCompound(), values[type]);
+        } else {
+            FactoryRecipeTypeCodec.writeLegacyOrdinal(itemStack.getTagCompound(), type);
+        }
     }
 
     @Override
@@ -512,21 +546,42 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public void setFluidStack(FluidStack fluidStack, Object... data) {
         if (data[0] instanceof ItemStack itemStack) {
-            if (fluidStack == null || fluidStack.amount == 0) {
-                ItemDataUtils.removeData(itemStack, "fluidTank");
-            } else {
-                ItemDataUtils.setCompound(itemStack, "fluidTank", fluidStack.writeToNBT(new NBTTagCompound()));
+            if (MachineType.get(itemStack) == MachineType.FLUID_TANK) {
+                IExtendedFluidTank fluidTank = getExtendedFluidTank(itemStack);
+                if (fluidTank != null) {
+                    fluidTank.setStack(fluidStack == null || fluidStack.amount <= 0 ? null : fluidStack.copy());
+                } else if (itemStack.getCount() == 1) {
+                    ItemDataUtils.setStoredFluid(itemStack, "fluidTank", fluidStack, Integer.MAX_VALUE);
+                }
+                return;
             }
+            ItemDataUtils.setStoredFluid(itemStack, "fluidTank", fluidStack, Integer.MAX_VALUE);
         }
     }
 
     @Override
     public FluidStack getFluidStack(Object... data) {
         if (data[0] instanceof ItemStack itemStack) {
-            if (!ItemDataUtils.hasData(itemStack, "fluidTank")) {
-                return null;
+            if (MachineType.get(itemStack) == MachineType.FLUID_TANK) {
+                IExtendedFluidTank fluidTank = getExtendedFluidTank(itemStack);
+                if (fluidTank != null && fluidTank.getFluid() != null) {
+                    return fluidTank.getFluid().copy();
+                }
+                return ItemDataUtils.getStoredFluid(itemStack, "fluidTank");
             }
-            return FluidStack.loadFluidStackFromNBT(ItemDataUtils.getCompound(itemStack, "fluidTank"));
+            return ItemDataUtils.getStoredFluid(itemStack, "fluidTank");
+        }
+        return null;
+    }
+
+    @Nullable
+    private IExtendedFluidTank getExtendedFluidTank(@Nonnull ItemStack stack) {
+        if (stack.getCount() != 1 || MachineType.get(stack) != MachineType.FLUID_TANK) {
+            return null;
+        }
+        IFluidHandlerItem fluidHandlerItem = FluidContainerUtils.getFluidHandlerCapability(stack);
+        if (fluidHandlerItem instanceof IMekanismFluidHandler fluidHandler) {
+            return fluidHandler.getFluidTank(0, null);
         }
         return null;
     }
@@ -548,63 +603,44 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         return ItemDataUtils.getBoolean(itemStack, "bucketMode");
     }
 
-    @Override
-    public double getEnergy(ItemStack itemStack) {
-        if (itemStack.getCount() > 1) {
-            return 0;
-        }
-        if (!MachineType.get(itemStack).isElectric) {
-            return 0;
-        }
-        return ItemDataUtils.getDouble(itemStack, "energyStored");
-    }
-
-    @Override
-    public void setEnergy(ItemStack itemStack, double amount) {
+    public void setStoredEnergy(ItemStack itemStack, double amount) {
         if (itemStack.getCount() > 1) {
             return;
         }
-        if (!MachineType.get(itemStack).isElectric) {
-            return;
-        }
-        if (amount == 0) {
-            NBTTagCompound dataMap = ItemDataUtils.getDataMap(itemStack);
-            dataMap.removeTag("energyStored");
-            if (dataMap.isEmpty() && itemStack.getTagCompound() != null) {
-                itemStack.getTagCompound().removeTag(ItemDataUtils.DATA_ID);
-            }
-        } else {
-            ItemDataUtils.setDouble(itemStack, "energyStored", Math.max(Math.min(amount, getMaxEnergy(itemStack)), 0));
-        }
-    }
-
-    @Override
-    public double getMaxEnergy(ItemStack itemStack) {
         MachineType machineType = MachineType.get(itemStack);
+        if (machineType == null || !machineType.isElectric) {
+            return;
+        }
+        StorageUtils.setStoredEnergy(itemStack, amount, getEnergyCapacity(itemStack));
+    }
+
+    public double getEnergyCapacity(ItemStack itemStack) {
+        MachineType machineType = MachineType.get(itemStack);
+        if (machineType == null) {
+            return 0;
+        }
         if (machineType.isFactory()) {
             RecipeType recipeType = getRecipeTypeOrNull(itemStack);
             int tierProcess = machineType.factoryTier.processes;
-            double baseMaxEnergy = machineType.factoryTier == FactoryTier.CREATIVE ? Double.MAX_VALUE : tierProcess * (recipeType == null ? 1 : Math.max(0.5D * recipeType.getEnergyStorage(), recipeType.getEnergyUsage()));
-            return ItemDataUtils.hasData(itemStack, "upgrades") ? MekanismUtils.getMaxEnergy(itemStack, baseMaxEnergy) : baseMaxEnergy;
+            double baseMaxEnergy = tierProcess * (recipeType == null ? 1 : Math.max(0.5D * recipeType.getEnergyStorage(), recipeType.getEnergyUsage()));
+            return Upgrade.hasUpgradeData(ItemDataUtils.getDataMapIfPresent(itemStack)) ? MekanismUtils.getMaxEnergy(itemStack, baseMaxEnergy) : baseMaxEnergy;
         }
-        return ItemDataUtils.hasData(itemStack, "upgrades") ? MekanismUtils.getMaxEnergy(itemStack, machineType.getStorage()) : machineType.getStorage();
+        return Upgrade.hasUpgradeData(ItemDataUtils.getDataMapIfPresent(itemStack)) ? MekanismUtils.getMaxEnergy(itemStack, machineType.getStorage()) : machineType.getStorage();
     }
 
-    @Override
-    public double getMaxTransfer(ItemStack itemStack) {
+    public double getEnergyTransfer(ItemStack itemStack) {
         if (itemStack.getCount() > 1) {
             return 0;
         }
-        return getMaxEnergy(itemStack) * 0.005;
+        return getEnergyCapacity(itemStack) * 0.005;
     }
 
-    @Override
-    public boolean canReceive(ItemStack itemStack) {
-        return MachineType.get(itemStack).isElectric && itemStack.getCount() == 1;
+    public boolean canReceiveEnergy(ItemStack itemStack) {
+        MachineType machineType = MachineType.get(itemStack);
+        return machineType != null && machineType.isElectric && itemStack.getCount() == 1;
     }
 
-    @Override
-    public boolean canSend(ItemStack itemStack) {
+    public boolean canSendEnergy(ItemStack itemStack) {
         return false;
     }
 
@@ -614,13 +650,10 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (theItem.getCount() > 1) {
             return 0;
         }
-        if (canReceive(theItem)) {
-            double energyNeeded = getMaxEnergy(theItem) - getEnergy(theItem);
-            double toReceive = Math.min(RFIntegration.fromRF(energy), energyNeeded);
-            if (!simulate) {
-                setEnergy(theItem, getEnergy(theItem) + toReceive);
-            }
-            return RFIntegration.toRF(toReceive);
+        if (canReceiveEnergy(theItem)) {
+            double amount = RFIntegration.fromRF(energy);
+            double remainder = StorageUtils.insertEnergy(theItem, amount, Action.get(!simulate));
+            return RFIntegration.toRF(amount - remainder);
         }
         return 0;
     }
@@ -631,13 +664,8 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (theItem.getCount() > 1) {
             return 0;
         }
-        if (canSend(theItem)) {
-            double energyRemaining = getEnergy(theItem);
-            double toSend = Math.min(RFIntegration.fromRF(energy), energyRemaining);
-            if (!simulate) {
-                setEnergy(theItem, getEnergy(theItem) - toSend);
-            }
-            return RFIntegration.toRF(toSend);
+        if (canSendEnergy(theItem)) {
+            return RFIntegration.toRF(StorageUtils.extractEnergy(theItem, RFIntegration.fromRF(energy), Action.get(!simulate)));
         }
         return 0;
     }
@@ -645,35 +673,36 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getEnergy(theItem));
+        return RFIntegration.toRF(StorageUtils.getStoredEnergy(theItem));
     }
 
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int getMaxEnergyStored(ItemStack theItem) {
-        return RFIntegration.toRF(getMaxEnergy(theItem));
+        return RFIntegration.toRF(getEnergyCapacity(theItem));
     }
 
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public IElectricItemManager getManager(ItemStack itemStack) {
-        return IC2ItemManager.getManager(this);
+        return IC2ItemManager.getManager();
     }
 
-    @Override
     public FluidStack getFluid(ItemStack container) {
         return getFluidStack(container);
     }
 
-    @Override
     public int getCapacity(ItemStack container) {
         return FluidTankTier.values()[getBaseTier(container).ordinal()].getStorage();
     }
 
-    @Override
     public int fill(ItemStack container, FluidStack resource, boolean doFill) {
         if (container.getCount() > 1) {
             return 0;
+        }
+        IExtendedFluidTank fluidTank = getExtendedFluidTank(container);
+        if (fluidTank != null) {
+            return fluidTank.fill(resource, doFill);
         }
         if (MachineType.get(container) == MachineType.FLUID_TANK && resource != null) {
             if (getBaseTier(container) == BaseTier.CREATIVE) {
@@ -699,18 +728,39 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         return 0;
     }
 
-    @Override
+    private void setFluidStackSize(ItemStack itemStack, @Nullable IExtendedFluidTank fluidTank, @Nullable FluidStack type, int amount) {
+        if (amount <= 0 || type == null) {
+            if (fluidTank != null) {
+                fluidTank.setEmpty();
+            } else {
+                setFluidStack(null, itemStack);
+            }
+        } else if (fluidTank != null) {
+            if (fluidTank.isEmpty()) {
+                fluidTank.setStack(PipeUtils.copy(type, amount));
+            } else {
+                fluidTank.setStackSize(amount, Action.EXECUTE);
+            }
+        } else {
+            setFluidStack(PipeUtils.copy(type, amount), itemStack);
+        }
+    }
+
     public FluidStack drain(ItemStack container, int maxDrain, boolean doDrain) {
         if (container.getCount() > 1) {
             return null;
+        }
+        IExtendedFluidTank fluidTank = getExtendedFluidTank(container);
+        if (fluidTank != null) {
+            return fluidTank.drain(maxDrain, doDrain);
         }
         if (MachineType.get(container) == MachineType.FLUID_TANK) {
             FluidStack stored = getFluidStack(container);
             if (stored != null) {
                 FluidStack toDrain = PipeUtils.copy(stored, Math.min(stored.amount, maxDrain));
                 if (doDrain && getBaseTier(container) != BaseTier.CREATIVE) {
-                    stored.amount -= toDrain.amount;
-                    setFluidStack(stored.amount > 0 ? stored : null, container);
+                    int remaining = stored.amount - toDrain.amount;
+                    setFluidStack(remaining > 0 ? PipeUtils.copy(stored, remaining) : null, container);
                 }
                 return toDrain;
             }
@@ -723,7 +773,11 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (!itemstack.hasTagCompound()) {
             return BaseTier.BASIC;
         }
-        return BaseTier.values()[itemstack.getTagCompound().getInteger("tier")];
+        int tier = itemstack.getTagCompound().getInteger("tier");
+        if (tier >= 0 && tier < BaseTier.values().length) {
+            return BaseTier.values()[tier];
+        }
+        return BaseTier.BASIC;
     }
 
     @Override
@@ -737,7 +791,11 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public UUID getOwnerUUID(ItemStack stack) {
         if (ItemDataUtils.hasData(stack, "ownerUUID")) {
-            return UUID.fromString(ItemDataUtils.getString(stack, "ownerUUID"));
+            try {
+                return UUID.fromString(ItemDataUtils.getString(stack, "ownerUUID"));
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
         }
         return null;
     }
@@ -756,7 +814,11 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (!MekanismConfig.current().general.allowProtection.val()) {
             return SecurityMode.PUBLIC;
         }
-        return SecurityMode.values()[ItemDataUtils.getInt(stack, "security")];
+        int security = ItemDataUtils.getInt(stack, "security");
+        if (security >= 0 && security < SecurityMode.values().length) {
+            return SecurityMode.values()[security];
+        }
+        return SecurityMode.PUBLIC;
     }
 
     @Override
@@ -771,6 +833,9 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
     @Override
     public boolean hasSecurity(ItemStack stack) {
         MachineType type = MachineType.get(stack);
+        if (type == null) {
+            return false;
+        }
         return type != MachineType.LASER && type != MachineType.CHARGEPAD && type != MachineType.TELEPORTER && type != MachineType.QUANTUM_ENTANGLOPORTER && type != MachineType.INDUSTRIAL_ALARM;
 
     }
@@ -782,13 +847,24 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
 
     @Override
     public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
-        return new ItemCapabilityWrapper(stack, new TeslaItemWrapper(), new ForgeEnergyItemWrapper(), new FluidItemWrapper()) {
+        return new ItemCapabilityWrapper(stack, new TeslaItemWrapper(), new ForgeEnergyItemWrapper(),
+                RateLimitEnergyHandler.create(() -> getEnergyTransfer(stack), () -> getEnergyCapacity(stack), BasicEnergyContainer.manualOnly, ConstantPredicates.alwaysTrue()),
+                RateLimitFluidHandler.create(() -> FluidTankTier.values()[getBaseTier(stack).ordinal()], "fluidTank")) {
             @Override
             public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing facing) {
                 if (capability == CapabilityFluidHandler.FLUID_HANDLER_ITEM_CAPABILITY) {
-                    return MachineType.get(itemStack) == MachineType.FLUID_TANK;
+                    return MachineType.get(itemStack) == MachineType.FLUID_TANK && itemStack.getCount() == 1;
                 }
                 return super.hasCapability(capability, facing);
+            }
+
+            @Override
+            public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing facing) {
+                if (capability == CapabilityFluidHandler.FLUID_HANDLER_ITEM_CAPABILITY &&
+                        (MachineType.get(itemStack) != MachineType.FLUID_TANK || itemStack.getCount() != 1)) {
+                    return null;
+                }
+                return super.getCapability(capability, facing);
             }
         };
     }
@@ -796,16 +872,13 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
 
     @Override
     public boolean showDurabilityBar(ItemStack stack) {
-        MachineType type = MachineType.get(stack);
-        if (type == MachineType.CREATIVE_FACTORY) {
-            return false;
-        }
-        return getEnergy(stack) > 0;
+        return stack.getCount() == 1 && StorageUtils.getStoredEnergy(stack) > 0;
     }
 
     @Override
     public double getDurabilityForDisplay(ItemStack stack) {
-        return 1D - (getEnergy(stack) / getMaxEnergy(stack));
+        double capacity = getEnergyCapacity(stack);
+        return capacity <= 0 ? 1D : 1D - (StorageUtils.getStoredEnergy(stack) / capacity);
     }
 
     @Override
@@ -835,7 +908,7 @@ public class ItemBlockMachine extends ItemBlock implements IEnergizedItem, ISpec
         if (MachineType.get(stack) == MachineType.FLUID_TANK) {
             return new TextComponentGroup(TextFormatting.GRAY).translation("mekanism.tooltip.portableTank.bucketMode", LangUtils.onOffColoured(getBucketMode(stack)));
         }
-        return null;
+        return new TextComponentString("");
     }
 
 }

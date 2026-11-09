@@ -1,5 +1,6 @@
 {
       "parent": "block/cube_all",
+      "ambientocclusion": false,
       "textures": {
             "0": "mekanism:blocks/models/control_rod_assembly",
             "particle": "mekanism:blocks/models/control_rod_assembly"
@@ -2052,3 +2053,4 @@
       }],
       "credit": "Made with Blockbench"
 }
+

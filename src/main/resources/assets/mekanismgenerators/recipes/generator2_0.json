@@ -1,0 +1,23 @@
+{
+  "result": {
+    "item": "mekanismgenerators:generator2",
+    "data": 0,
+    "count": 4
+  },
+  "pattern": [
+    " I ",
+    "IXI",
+    " I "
+  ],
+  "type": "mekanism:ore_shaped",
+  "key": {
+    "I": {
+      "ore": "ingotLead",
+      "type": "forge:ore_dict"
+    },
+    "X": {
+      "item": "mekanism:basicblock",
+      "data": 8
+    }
+  }
+}

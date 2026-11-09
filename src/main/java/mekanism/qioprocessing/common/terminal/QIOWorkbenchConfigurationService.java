@@ -1,0 +1,610 @@
+package mekanism.qioprocessing.common.terminal;
+
+import mekanism.qioprocessing.api.resource.PortableResourceDescriptor;
+import mekanism.qioprocessing.common.content.QIOProcessingNetworkData;
+import mekanism.qioprocessing.common.content.workbench.QIOWorkbenchConfiguration;
+import mekanism.qioprocessing.common.content.workbench.QIOWorkbenchConfigurationMutation;
+import mekanism.qioprocessing.common.content.workbench.QIOWorkbenchConfigurationMutation.Action;
+import mekanism.qioprocessing.common.content.workbench.QIOWorkbenchConfigurationMutation.RecipeTarget;
+import mekanism.qioprocessing.common.planning.QIORecipeCatalogService;
+import mekanism.qioprocessing.common.planning.QIOWorkbenchRecipeCatalog;
+import mekanism.qioprocessing.common.planning.QIOWorkbenchRecipeCatalog.CandidateDefinition;
+import mekanism.qioprocessing.common.planning.QIOWorkbenchRecipeCatalog.IngredientDefinition;
+import mekanism.qioprocessing.common.planning.QIOWorkbenchRecipeCatalog.RecipeDefinition;
+import mekanism.qioprocessing.common.terminal.QIOWorkbenchConfigurationSnapshot.*;
+import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.item.ItemStack;
+import net.minecraft.util.ResourceLocation;
+import net.minecraft.world.World;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import java.util.*;
+
+/**
+ * Server-authoritative workbench configuration browsing and mutation.
+ */
+
+/**
+ * QIO 处理模块中的 QIOWorkbenchConfigurationService 类型。
+ *
+ * <p>该类型封装本层的数据、状态或服务职责；调用方应遵守其公开方法的输入约束，
+ * 实现负责保持状态与持久化表示的一致。</p>
+ */
+public final class QIOWorkbenchConfigurationService {
+
+    public static final int MAX_QUERY_LENGTH = 128;
+
+    public enum MutationStatus {
+        APPLIED,
+        UNCHANGED,
+        REVISION_CONFLICT,
+        CATALOG_CHANGED,
+        INVALID_TARGET,
+        INVALID_PATTERN,
+        READ_ONLY,
+        LAST_CANDIDATE,
+        BUSY,
+        UNAVAILABLE
+    }
+
+    public static final class CoreUnavailable extends IllegalStateException {
+        public CoreUnavailable(String message, Throwable cause) {
+            super(message, cause);
+        }
+
+        public CoreUnavailable(String message) {
+            super(message);
+        }
+    }
+
+    private QIOWorkbenchConfigurationService() {
+    }
+
+    @Nonnull
+    /** 打开工作台配置编辑上下文。 */
+    public static Context open(@Nonnull QIOProcessingTerminalSession session,
+                               @Nonnull QIOProcessingNetworkData network, long currentAccessRevision,
+                               @Nonnull UUID playerUUID) {
+        return open(session, network, currentAccessRevision, playerUUID, null);
+    }
+
+    @Nonnull
+    /** 按目标版本打开工作台配置编辑上下文。 */
+    public static Context open(@Nonnull QIOProcessingTerminalSession session,
+                               @Nonnull QIOProcessingNetworkData network, long currentAccessRevision,
+                               @Nonnull UUID playerUUID, @Nullable World world) {
+        validateSession(session, network, currentAccessRevision, playerUUID);
+        QIORecipeCatalogService.State catalog = QIORecipeCatalogService.INSTANCE.getState(
+                network.getWorkbenchConfiguration(), world == null ? 0 : world.provider.getDimension());
+        UUID owner = network.getLastKnownFrequencyIdentity().getOwnerUUID();
+        EntityPlayer player = world == null || world.getMinecraftServer() == null ? null :
+                world.getMinecraftServer().getPlayerList().getPlayerByUUID(playerUUID);
+        return new Context(network, catalog, owner != null && owner.equals(playerUUID), world, player);
+    }
+
+    @Nonnull
+    /** 查询工作台配置可用产品分页。 */
+    public static QIOWorkbenchConfigurationSnapshot products(@Nonnull Context context,
+                                                             int requestedOffset, int requestedPageSize, @Nonnull String query) {
+        if (!QIOWorkbenchCorePageService.available()) {
+            throw new CoreUnavailable("QIO Workbench core is unavailable");
+        }
+        try {
+            return QIOWorkbenchCorePageService.products(context.world(), context.frequencyUUID(),
+                    requestedOffset, requestedPageSize, query);
+        } catch (java.io.IOException | IllegalStateException unavailable) {
+            throw new CoreUnavailable("QIO Workbench core product page unavailable", unavailable);
+        }
+    }
+
+    @Nonnull
+    /** 查询产品对应的配方分页。 */
+    public static QIOWorkbenchConfigurationSnapshot recipes(@Nonnull Context context,
+                                                            @Nonnull String productKey, int requestedOffset, int requestedPageSize) {
+        if (!QIOWorkbenchCorePageService.available()) {
+            throw new CoreUnavailable("QIO Workbench core is unavailable");
+        }
+        try {
+            return QIOWorkbenchCorePageService.recipes(context.world(), context.frequencyUUID(),
+                    productKey, requestedOffset, requestedPageSize);
+        } catch (java.io.IOException | IllegalStateException unavailable) {
+            throw new CoreUnavailable("QIO Workbench core recipe page unavailable", unavailable);
+        }
+    }
+
+    @Nonnull
+    /** 查询指定配方输入槽位的候选资源。 */
+    public static QIOWorkbenchConfigurationSnapshot candidates(@Nonnull Context context,
+                                                               @Nonnull String productKey, @Nonnull String recipeId,
+                                                               @Nonnull String recipeSignature, int ingredientSlot, int requestedOffset,
+                                                               int requestedPageSize) {
+        if (!QIOWorkbenchCorePageService.available()) {
+            throw new CoreUnavailable("QIO Workbench core is unavailable");
+        }
+        try {
+            return QIOWorkbenchCorePageService.candidates(context.world(), context.frequencyUUID(),
+                    productKey, recipeId, recipeSignature, ingredientSlot,
+                    requestedOffset, requestedPageSize);
+        } catch (java.io.IOException | IllegalStateException unavailable) {
+            throw new CoreUnavailable("QIO Workbench core candidate page unavailable", unavailable);
+        }
+    }
+
+    @Nonnull
+    /** 应用工作台配置变更并检查版本冲突。 */
+    public static MutationStatus mutate(@Nonnull Context context,
+                                        long expectedConfigurationRevision, long expectedCatalogRevision,
+                                        @Nonnull QIOWorkbenchConfigurationMutation mutation) {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(mutation, "mutation");
+        if (!context.editable) {
+            return MutationStatus.READ_ONLY;
+        }
+        if (QIOWorkbenchCorePageService.available()) {
+            return QIOWorkbenchCorePageService.mutate(context, expectedConfigurationRevision,
+                    expectedCatalogRevision, mutation);
+        }
+        return MutationStatus.UNAVAILABLE;
+    }
+
+    private static final class PatternValidationException extends IllegalArgumentException {
+        private PatternValidationException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    private static void apply(Context context,
+                              QIOWorkbenchConfiguration configuration,
+                              QIOWorkbenchConfigurationMutation mutation) {
+        QIOWorkbenchRecipeCatalog.Snapshot catalog = context.catalog.getSnapshot();
+        if (mutation.getAction() == Action.ENCODE_PATTERN || mutation.getAction() == Action.ENCODE_TARGETS) {
+            throw new PatternValidationException("Encoding requires the durable workbench job protocol", null);
+        }
+        if (mutation.getAction() == Action.DELETE_PATTERN) {
+            QIOWorkbenchConfiguration.EncodedPattern existing =
+                    configuration.getEncodedPattern(mutation.getRecipeId());
+            if (existing == null || !existing.getRecipeSignature().equals(
+                    mutation.getRecipeSignature())) {
+                throw new IllegalArgumentException("Unknown or changed workbench pattern");
+            }
+            configuration.removeEncodedPattern(mutation.getRecipeId());
+            return;
+        }
+        if (mutation.getAction() == Action.DELETE_PRODUCT) {
+            PortableResourceDescriptor output = findOutput(catalog,
+                    mutation.getProductKey());
+            if (output == null || !configuration.removeEncodedProduct(
+                    mutation.getProductKey(), output)) {
+                throw new IllegalArgumentException("Unknown workbench product");
+            }
+            return;
+        }
+        if (mutation.getAction() == Action.BATCH_DELETE_PRODUCTS) {
+            Map<String, PortableResourceDescriptor> products = new LinkedHashMap<>();
+            for (String productKey : mutation.getProductKeys()) {
+                PortableResourceDescriptor output = findOutput(catalog, productKey);
+                if (output == null) {
+                    throw new IllegalArgumentException("Unknown workbench product");
+                }
+                products.put(productKey, output);
+            }
+            configuration.removeEncodedProducts(products);
+            return;
+        }
+        if (mutation.getAction() == Action.RESET_ALL) {
+            configuration.resetAll();
+            return;
+        }
+        if (mutation.getAction() == Action.RESTORE_RECOVERY) {
+            int restored = QIORecipeCatalogService.INSTANCE.restoreRecoveryPatterns(configuration);
+            if (restored == 0 && context.network.hasWorkbenchConfigurationRecovery()) {
+                // The old whole-configuration blob is intentionally not parsed implicitly. Once
+                // the player has opened the fresh editable configuration and chosen this action,
+                // discard only the bounded recovery marker so it cannot keep the network dirty.
+                context.network.clearWorkbenchConfigurationRecovery();
+                return;
+            }
+            if (restored == 0) {
+                throw new IllegalArgumentException("No quarantined workbench patterns are available");
+            }
+            return;
+        }
+        PortableResourceDescriptor output = findOutput(catalog, mutation.getProductKey());
+        if (output == null) {
+            throw new IllegalArgumentException("Unknown workbench product");
+        }
+        List<String> defaultRecipes = strings(catalog.getRecipeIds(output));
+        if (mutation.getAction() == Action.RESET_PRODUCT) {
+            configuration.resetProduct(mutation.getProductKey(), defaultRecipes);
+            return;
+        }
+        if (mutation.getAction() == Action.BATCH_SET_RECIPES_ENABLED ||
+                mutation.getAction() == Action.BATCH_MOVE_RECIPES ||
+                mutation.getAction() == Action.BATCH_DELETE_PATTERNS) {
+            Map<String, String> signatures = new LinkedHashMap<>();
+            List<String> recipeIds = new ArrayList<>();
+            for (RecipeTarget target : mutation.getRecipeTargets()) {
+                RecipeDefinition targetDefinition = requireRecipe(catalog,
+                        mutation.getProductKey(), target.getRecipeId(),
+                        target.getRecipeSignature());
+                String targetRecipeId = targetDefinition.getRecipeId().toString();
+                signatures.put(targetRecipeId, targetDefinition.getSignature());
+                recipeIds.add(targetRecipeId);
+            }
+            switch (mutation.getAction()) {
+                case BATCH_SET_RECIPES_ENABLED -> configuration.setRecipesEnabled(
+                        signatures, mutation.isEnabled());
+                case BATCH_MOVE_RECIPES -> configuration.moveRecipes(
+                        mutation.getProductKey(), defaultRecipes, recipeIds,
+                        mutation.getDirection(), mutation.getTargetIndex() != -1);
+                case BATCH_DELETE_PATTERNS -> configuration.removeEncodedPatterns(
+                        signatures);
+                default -> throw new IllegalArgumentException(
+                        "Unsupported workbench batch mutation");
+            }
+            return;
+        }
+        RecipeDefinition definition = requireRecipe(catalog, mutation.getProductKey(),
+                mutation.getRecipeId(), mutation.getRecipeSignature());
+        String recipeId = definition.getRecipeId().toString();
+        String signature = definition.getSignature();
+        switch (mutation.getAction()) {
+            case TOGGLE_RECIPE -> configuration.setRecipeEnabled(recipeId, signature,
+                    !configuration.isRecipeEnabled(recipeId, signature));
+            case MOVE_RECIPE -> configuration.moveRecipe(mutation.getProductKey(),
+                    defaultRecipes, recipeId, mutation.getDirection(), false);
+            case MOVE_RECIPE_TO_TOP -> configuration.moveRecipe(mutation.getProductKey(),
+                    defaultRecipes, recipeId, -1, true);
+            case MOVE_RECIPE_TO_BOTTOM -> configuration.moveRecipe(mutation.getProductKey(),
+                    defaultRecipes, recipeId, 1, true);
+            case RESET_RECIPE -> configuration.resetRecipe(recipeId);
+            case TOGGLE_CANDIDATE, MOVE_CANDIDATE, MOVE_CANDIDATE_TO_TOP,
+                 MOVE_CANDIDATE_TO_BOTTOM, MOVE_CANDIDATE_TO_INDEX,
+                 SYNC_EQUIVALENT_CANDIDATES -> applyCandidate(configuration, catalog,
+                    definition, mutation);
+            default -> throw new IllegalArgumentException("Unsupported workbench mutation");
+        }
+    }
+
+    static void preferEncodedCandidates(World world,
+                                        QIOWorkbenchConfiguration configuration,
+                                        QIOWorkbenchConfiguration.EncodedPattern pattern) {
+        QIOWorkbenchRecipeCatalog.Snapshot encoded = QIORecipeCatalogService.INSTANCE.getEncodedSelectionSnapshot(pattern, world.provider.getDimension());
+        if (encoded == null) return;
+        preferEncodedCandidates(configuration, pattern, encoded);
+    }
+
+    static void preferIndexedCandidates(QIOWorkbenchConfiguration configuration,
+                                        QIOWorkbenchConfiguration.EncodedPattern pattern, int dimension) {
+        QIOWorkbenchRecipeCatalog.Snapshot encoded = QIORecipeCatalogService.INSTANCE.getEncodedSelectionSnapshot(pattern, dimension);
+        if (encoded != null) preferEncodedCandidates(configuration, pattern, encoded);
+    }
+
+    private static void preferEncodedCandidates(QIOWorkbenchConfiguration configuration,
+                                                QIOWorkbenchConfiguration.EncodedPattern pattern, QIOWorkbenchRecipeCatalog.Snapshot encoded) {
+        RecipeDefinition definition = encoded.getRecipeDefinition(pattern.getRecipeId());
+        if (definition == null) return;
+        Set<Integer> assignedIngredients = new HashSet<>();
+        List<ItemStack> grid = pattern.getGrid();
+        for (int gridSlot = 0; gridSlot < grid.size(); gridSlot++) {
+            ItemStack selected = grid.get(gridSlot);
+            if (selected.isEmpty()) continue;
+            int ingredientSlot = matchingIngredient(encoded, definition, selected, gridSlot,
+                    assignedIngredients);
+            if (ingredientSlot < 0) continue;
+            IngredientDefinition ingredient = definition.getIngredients().get(ingredientSlot);
+            for (CandidateDefinition candidate : encoded.getCandidates(ingredient)) {
+                ItemStack display = candidate.getDisplayStack();
+                if (ItemStack.areItemsEqual(selected, display) &&
+                        ItemStack.areItemStackTagsEqual(selected, display)) {
+                    try {
+                        configuration.moveCandidate(pattern.getRecipeId().toString(),
+                                pattern.getRecipeSignature(), ingredientSlot,
+                                encoded.getCandidateIds(definition, ingredientSlot),
+                                candidate.getCandidateId(), -1, true);
+                    } catch (IllegalArgumentException | IllegalStateException ignored) {
+                        // The validated pattern remains usable even if a sparse preference
+                        // override cannot be allocated at its configured limit.
+                    }
+                    assignedIngredients.add(ingredientSlot);
+                    break;
+                }
+            }
+        }
+    }
+
+    private static int matchingIngredient(QIOWorkbenchRecipeCatalog.Snapshot catalog,
+                                          RecipeDefinition definition, ItemStack selected,
+                                          int preferredSlot, Set<Integer> assigned) {
+        if (preferredSlot >= 0 && preferredSlot < definition.getIngredients().size() &&
+                !assigned.contains(preferredSlot) && matches(catalog,
+                definition.getIngredients().get(preferredSlot), selected)) {
+            return preferredSlot;
+        }
+        for (IngredientDefinition ingredient : definition.getIngredients()) {
+            if (!assigned.contains(ingredient.getSlot()) &&
+                    matches(catalog, ingredient, selected)) {
+                return ingredient.getSlot();
+            }
+        }
+        return -1;
+    }
+
+    private static boolean matches(QIOWorkbenchRecipeCatalog.Snapshot catalog,
+                                   IngredientDefinition ingredient, ItemStack selected) {
+        for (CandidateDefinition candidate : catalog.getCandidates(ingredient)) {
+            ItemStack display = candidate.getDisplayStack();
+            if (ItemStack.areItemsEqual(selected, display) &&
+                    ItemStack.areItemStackTagsEqual(selected, display)) return true;
+        }
+        return false;
+    }
+
+    private static void applyCandidate(QIOWorkbenchConfiguration configuration,
+                                       QIOWorkbenchRecipeCatalog.Snapshot catalog, RecipeDefinition definition,
+                                       QIOWorkbenchConfigurationMutation mutation) {
+        int slot = mutation.getIngredientSlot();
+        if (slot < 0 || slot >= definition.getIngredients().size() ||
+                definition.getIngredients().get(slot).isEmpty()) {
+            throw new IllegalArgumentException("Unknown workbench ingredient");
+        }
+        List<String> defaults = catalog.getCandidateIds(definition, slot);
+        String recipeId = definition.getRecipeId().toString();
+        String signature = definition.getSignature();
+        switch (mutation.getAction()) {
+            case TOGGLE_CANDIDATE -> configuration.setCandidateEnabled(recipeId, signature,
+                    slot, defaults, mutation.getCandidateId(), !configuration.isCandidateEnabled(
+                            recipeId, signature, slot, mutation.getCandidateId()));
+            case MOVE_CANDIDATE -> configuration.moveCandidate(recipeId, signature, slot,
+                    defaults, mutation.getCandidateId(), mutation.getDirection(), false);
+            case MOVE_CANDIDATE_TO_TOP -> configuration.moveCandidate(recipeId, signature,
+                    slot, defaults, mutation.getCandidateId(), -1, true);
+            case MOVE_CANDIDATE_TO_BOTTOM -> configuration.moveCandidate(recipeId, signature,
+                    slot, defaults, mutation.getCandidateId(), 1, true);
+            case MOVE_CANDIDATE_TO_INDEX -> configuration.moveCandidateToIndex(recipeId,
+                    signature, slot, defaults, mutation.getCandidateId(),
+                    mutation.getTargetIndex());
+            case SYNC_EQUIVALENT_CANDIDATES -> configuration.synchronizeEquivalentCandidates(
+                    recipeId, signature, slot,
+                    equivalentCandidateDefaults(catalog, definition, slot));
+            default -> throw new IllegalArgumentException("Unsupported candidate mutation");
+        }
+    }
+
+    private static Map<Integer, List<String>> equivalentCandidateDefaults(
+            QIOWorkbenchRecipeCatalog.Snapshot catalog, RecipeDefinition definition,
+            int sourceSlot) {
+        IngredientDefinition source = definition.getIngredients().get(sourceSlot);
+        Map<Integer, List<String>> equivalent = new LinkedHashMap<>();
+        for (IngredientDefinition ingredient : definition.getIngredients()) {
+            if (!ingredient.isEmpty() &&
+                    source.getMatcherId() == ingredient.getMatcherId()) {
+                equivalent.put(ingredient.getSlot(), catalog.getCandidateIds(definition,
+                        ingredient.getSlot()));
+            }
+        }
+        return equivalent;
+    }
+
+    private static Recipe recipeSnapshot(QIOWorkbenchConfiguration configuration,
+                                         QIOWorkbenchRecipeCatalog.Snapshot catalog, RecipeDefinition definition, int order) {
+        List<Ingredient> ingredients = new ArrayList<>(9);
+        for (IngredientDefinition ingredient : definition.getIngredients()) {
+            if (ingredient.isEmpty()) {
+                ingredients.add(new Ingredient(ingredient.getSlot(), 0, 0, ItemStack.EMPTY,
+                        null, 0));
+                continue;
+            }
+            List<String> defaults = catalog.getCandidateIds(definition, ingredient.getSlot());
+            List<String> enabled = configuration.orderedEnabledCandidates(
+                    definition.getRecipeId().toString(), definition.getSignature(),
+                    ingredient.getSlot(), defaults);
+            Map<String, CandidateDefinition> byId = candidatesById(catalog, ingredient);
+            CandidateDefinition representative = enabled.isEmpty() ? null :
+                    byId.get(enabled.get(0));
+            if (representative == null) {
+                throw new IllegalStateException("Workbench ingredient has no representative");
+            }
+            ingredients.add(new Ingredient(ingredient.getSlot(), defaults.size(),
+                    enabled.size(), representative.getDisplayStack(),
+                    representative.isVirtualFluid() ? representative.getResource() : null,
+                    representative.isVirtualFluid() ? representative.getAmount() : 0));
+        }
+        return new Recipe(definition.getRecipeId().toString(), definition.getSignature(),
+                definition.getOutput(), definition.getOutputAmount(),
+                configuration.isRecipeEnabled(definition.getRecipeId().toString(),
+                        definition.getSignature()), order, definition.isShaped(),
+                definition.getWidth(), definition.getHeight(), ingredients);
+    }
+
+    private static QIOWorkbenchConfigurationSnapshot snapshot(Context context,
+                                                              PageKind kind, int requestedOffset, int requestedPageSize, int totalSize,
+                                                              String query, String productKey, String recipeId, String recipeSignature,
+                                                              int ingredientSlot, List<Product> products, List<Recipe> recipes,
+                                                              List<Candidate> candidates) {
+        int pageSize = checkedPageSize(requestedPageSize);
+        int offset = Math.max(0, Math.min(requestedOffset, totalSize));
+        int end = Math.min(totalSize, offset + pageSize);
+        int recoveryCount = context.configuration().getRecoveryPatternCount();
+        if (context.network.hasWorkbenchConfigurationRecovery()) {
+            // A whole incompatible configuration is represented by one recoverable marker even
+            // when no individual pattern could be decoded.
+            recoveryCount = Math.max(1, recoveryCount);
+        }
+        return new QIOWorkbenchConfigurationSnapshot(kind,
+                context.configuration().getConfigUUID(),
+                context.configuration().getOriginUUID(),
+                context.configuration().getRevision(), context.catalog.getRevision(),
+                context.editable, recoveryCount,
+                offset, totalSize, query, productKey, recipeId,
+                recipeSignature, ingredientSlot,
+                kind == PageKind.PRODUCTS ? products.subList(offset, end) :
+                        Collections.emptyList(),
+                kind == PageKind.RECIPES ? recipes.subList(offset, end) :
+                        Collections.emptyList(),
+                kind == PageKind.CANDIDATES ? candidates.subList(offset, end) :
+                        Collections.emptyList()).withDiagnostics(context.catalog.getSnapshot().getDiagnostics());
+    }
+
+    @Nullable
+    private static PortableResourceDescriptor findOutput(
+            QIOWorkbenchRecipeCatalog.Snapshot catalog, String productKey) {
+        String checked = checkedHash(productKey);
+        for (PortableResourceDescriptor output : catalog.getOrderedOutputs()) {
+            if (QIOWorkbenchRecipeCatalog.productKey(output).equals(checked)) {
+                return output;
+            }
+        }
+        return null;
+    }
+
+    private static RecipeDefinition requireRecipe(
+            QIOWorkbenchRecipeCatalog.Snapshot catalog, String productKey,
+            String recipeId, String signature) {
+        PortableResourceDescriptor output = findOutput(catalog, productKey);
+        RecipeDefinition definition = catalog.getRecipeDefinition(parseRecipe(recipeId));
+        if (output == null || definition == null || !definition.getOutput().equals(output) ||
+                !definition.getSignature().equals(checkedHash(signature))) {
+            throw new IllegalArgumentException("Unknown or changed workbench recipe");
+        }
+        return definition;
+    }
+
+    private static Map<String, CandidateDefinition> candidatesById(
+            QIOWorkbenchRecipeCatalog.Snapshot catalog, IngredientDefinition ingredient) {
+        Map<String, CandidateDefinition> result = new LinkedHashMap<>();
+        for (CandidateDefinition candidate : catalog.getCandidates(ingredient)) {
+            result.put(candidate.getCandidateId(), candidate);
+        }
+        return result;
+    }
+
+    private static boolean matchesProduct(QIOWorkbenchRecipeCatalog.Snapshot catalog,
+                                          PortableResourceDescriptor output, List<ResourceLocation> recipes, String query) {
+        if (query.isEmpty() || output.getRegistryName().toLowerCase(Locale.ROOT)
+                .contains(query)) {
+            return true;
+        }
+        ItemStack stack = output.resolveItem();
+        if (!stack.isEmpty() && stack.getDisplayName().toLowerCase(Locale.ROOT)
+                .contains(query)) {
+            return true;
+        }
+        for (ResourceLocation recipe : recipes) {
+            if (recipe.toString().toLowerCase(Locale.ROOT).contains(query)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<String> strings(List<ResourceLocation> ids) {
+        List<String> result = new ArrayList<>(ids.size());
+        ids.forEach(id -> result.add(id.toString()));
+        return result;
+    }
+
+    private static ResourceLocation parseRecipe(String recipeId) {
+        String checked = Objects.requireNonNull(recipeId, "recipeId").trim();
+        if (checked.isEmpty() || checked.length() > 256) {
+            throw new IllegalArgumentException("Invalid workbench recipe ID");
+        }
+        return new ResourceLocation(checked);
+    }
+
+    private static String normalizeQuery(String query) {
+        String checked = Objects.requireNonNull(query, "query").trim();
+        if (checked.length() > MAX_QUERY_LENGTH) {
+            throw new IllegalArgumentException("Workbench query is too long");
+        }
+        return checked.toLowerCase(Locale.ROOT);
+    }
+
+    private static String checkedHash(String value) {
+        String checked = Objects.requireNonNull(value, "hash").trim().toLowerCase(Locale.ROOT);
+        if (checked.length() != 64 ||
+                !checked.chars().allMatch(character -> character >= '0' && character <= '9' ||
+                        character >= 'a' && character <= 'f')) {
+            throw new IllegalArgumentException("Invalid workbench identifier");
+        }
+        return checked;
+    }
+
+    private static int checkedPageSize(int requestedPageSize) {
+        if (requestedPageSize <= 0) {
+            throw new IllegalArgumentException("Workbench page size must be positive");
+        }
+        return Math.min(requestedPageSize, QIOWorkbenchConfigurationSnapshot.MAX_PAGE_SIZE);
+    }
+
+    private static void validateSession(QIOProcessingTerminalSession session,
+                                        QIOProcessingNetworkData network, long currentAccessRevision, UUID playerUUID) {
+        Objects.requireNonNull(session, "session");
+        Objects.requireNonNull(network, "network");
+        Objects.requireNonNull(playerUUID, "playerUUID");
+        if (!session.isOpen() || session.getTerminalType() !=
+                QIOProcessingTerminalType.MANAGEMENT ||
+                !session.getPlayerUUID().equals(playerUUID) ||
+                session.getFrequencyUUID() == null ||
+                !session.getFrequencyUUID().equals(network.getFrequencyUUID())) {
+            throw new SecurityException("Invalid QIO workbench management session");
+        }
+        if (currentAccessRevision < 0 || session.getAccessRevision() !=
+                currentAccessRevision) {
+            throw new IllegalStateException("QIO workbench access changed");
+        }
+    }
+
+    public static final class Context {
+
+        private final QIOProcessingNetworkData network;
+        private final QIORecipeCatalogService.State catalog;
+        private final boolean editable;
+        @Nullable
+        private final World world;
+        @Nullable
+        private final EntityPlayer player;
+
+        private Context(QIOProcessingNetworkData network,
+                        QIORecipeCatalogService.State catalog, boolean editable, @Nullable World world,
+                        @Nullable EntityPlayer player) {
+            this.network = network;
+            this.catalog = catalog;
+            this.editable = editable;
+            this.world = world;
+            this.player = player;
+        }
+
+        @Nonnull
+        public QIOProcessingNetworkData getNetwork() {
+            return network;
+        }
+
+        public long getCatalogRevision() {
+            return QIOWorkbenchCorePageService.available() ?
+                    QIOWorkbenchCorePageService.currentCatalogRevision() : catalog.getRevision();
+        }
+
+        public boolean isEditable() {
+            return editable;
+        }
+
+        private QIOWorkbenchConfiguration configuration() {
+            return network.getWorkbenchConfiguration();
+        }
+
+        World world() {
+            return world;
+        }
+
+        @Nullable
+        EntityPlayer player() {
+            return player;
+        }
+
+        UUID frequencyUUID() {
+            return network.getFrequencyUUID();
+        }
+    }
+}

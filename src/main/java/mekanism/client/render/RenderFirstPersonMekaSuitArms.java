@@ -5,9 +5,12 @@
 package mekanism.client.render;
 
 import mekanism.client.model.mekasuitarmour.ModelMekAsuitBodyArm;
+import mekanism.client.render.bloom.MekaSuitFirstPersonBloomHelper;
 import mekanism.common.Mekanism;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.item.armor.ItemMekaSuitArmor;
 import mekanism.common.item.armor.ItemMekaSuitBodyArmor;
+import mekanism.common.lib.Color;
 import mekanism.common.util.MekanismUtils;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.AbstractClientPlayer;
@@ -57,6 +60,8 @@ public class RenderFirstPersonMekaSuitArms {
 
     private void renderArm(boolean rightHand, AbstractClientPlayer player) {
         ModelMekAsuitBodyArm armor = ModelMekAsuitBodyArm.armorModel;
+        ItemStack chestStack = player.getItemStackFromSlot(EntityEquipmentSlot.CHEST);
+        Color renderColor = getRenderTint(ItemMekaSuitArmor.getColorModulation(chestStack));
 
         armor.setVisible(true);
         if (rightHand) {
@@ -70,10 +75,15 @@ public class RenderFirstPersonMekaSuitArms {
         armor.swingProgress = 0.0F;
         armor.setRotationAngles(0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0625F, player);
         MekanismRenderer.bindTexture(MekanismUtils.getResource(MekanismUtils.ResourceType.RENDER, "MekAsuit.png"));
+        GlStateManager.color(renderColor.rf(), renderColor.gf(), renderColor.bf(), 1.0F);
         if (rightHand) {
             armor.rightArmRender(0.0625F);
         } else {
             armor.leftArmRender(0.0625F);
+        }
+        MekanismRenderer.resetColor();
+        if (Mekanism.hooks.Bloom) {
+            MekaSuitFirstPersonBloomHelper.requestArmBloom(player, rightHand);
         }
         GlStateManager.disableBlend();
     }
@@ -158,6 +168,14 @@ public class RenderFirstPersonMekaSuitArms {
         GlStateManager.popMatrix();
         GlStateManager.popMatrix();
     }
-}
 
+    private static Color getRenderTint(Color color) {
+        if (color == null) {
+            return Color.WHITE;
+        }
+        double tintStrength = color.ad();
+        double tintBase = 1.0D - tintStrength;
+        return Color.rgbd(color.rd() * tintStrength + tintBase, color.gd() * tintStrength + tintBase, color.bd() * tintStrength + tintBase);
+    }
+}
 

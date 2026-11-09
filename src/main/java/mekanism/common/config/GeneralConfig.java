@@ -78,6 +78,9 @@ public class GeneralConfig extends BaseConfig {
     public final DoubleOption TO_IC2 = new DoubleOption(this, "EUToJoules", .1D,
             "Conversion multiplier from Joules to EU (Joules * EUToJoules = EU)");
 
+    public final IntOption ic2InputTier = new IntOption(this, "IC2InputTier", 4,
+            "Fixed IC2 sink tier Mekanism exposes when accepting IC2 energy.", 0, 30);
+
     public final DoubleOption FROM_RF = new DoubleOption(this, "JoulesToRF", 2.5D,
             "Conversion multiplier from RF to Joules (RF * JoulesToRF = Joules)");
 
@@ -107,6 +110,9 @@ public class GeneralConfig extends BaseConfig {
 
     public final DoubleOption ENERGY_PER_REDSTONE_BLOCK = new DoubleOption(this, "EnergyPerRedstoneBlock", 90000D,
             "How much energy (Joules) a piece of redstone block gives in machines.");
+
+    public final BooleanOption bulkSlotItemConversion = new BooleanOption(this, "BulkSlotItemConversion", true,
+            "If enabled, item-to-gas, item-to-energy, and item-to-infusion inventory slots convert as many items per tick as their target storage can accept.");
 
     public final IntOption disassemblerEnergyUsage = new IntOption(this, "DisassemblerEnergyUsage", 10,
             "Base Energy (Joules) usage of the Atomic Disassembler. (Gets multiplied by speed factor)");
@@ -187,26 +193,60 @@ public class GeneralConfig extends BaseConfig {
     public final DoubleOption evaporationHeatDissipation = new DoubleOption(this, "EvaporationHeatDissipation", 0.02D,
             "Thermal Evaporation Tower heat loss per tick.");
 
-    public final DoubleOption evaporationTempMultiplier = new DoubleOption(this, "EvaporationTempMultiplier", 0.1D,
+    public final DoubleOption evaporationTempMultiplier = new DoubleOption(this, "EvaporationTempMultiplier", 0.4D,
             "Temperature to amount produced ratio for Thermal Evaporation Tower.");
 
     public final DoubleOption evaporationSolarMultiplier = new DoubleOption(this, "EvaporationSolarMultiplier", 0.2D,
             "Heat to absorb per Solar Panel array of Thermal Evaporation Tower.");
 
+    public final DoubleOption evaporationHeatCapacity = new DoubleOption(this, "EvaporationHeatCapacity", 100D,
+            "Heat capacity of each Thermal Evaporation Tower layer.", 1D, 1_000_000D);
+
     public final DoubleOption evaporationMaxTemp = new DoubleOption(this, "EvaporationMaxTemp", 3000D,
             "Max Temperature of the Thermal Evaporation Tower.");
 
+    /**
+     * @deprecated Use {@link #resistiveHeaterEfficiency}. Kept so existing config files and integrations still load.
+     */
+    @Deprecated
     public final DoubleOption energyPerHeat = new DoubleOption(this, "EnergyPerHeat", 1000D,
-            "Joules required by the Resistive Heater to produce one unit of heat. Also affects Thermoelectric Boiler's Water->Steam rate.");
+            "Legacy Joules required by the Resistive Heater to produce one unit of heat.");
 
-    public final DoubleOption maxEnergyPerSteam = new DoubleOption(this, "MaxEnergyPerSteam", 100D,
+    public final DoubleOption resistiveHeaterEfficiency = new DoubleOption(this, "ResistiveHeaterEfficiency", 0.6D,
+            "Heat energy created from one Joule in the Resistive Heater.", 0D, 1D);
+
+    public final DoubleOption maxEnergyPerSteam = new DoubleOption(this, "MaxEnergyPerSteam", 10D,
             "Maximum Joules per mB of Steam. Also affects Thermoelectric Boiler.");
 
-    public final DoubleOption superheatingHeatTransfer = new DoubleOption(this, "SuperheatingHeatTransfer", 10000D,
-            "Amount of heat each Boiler heating element produces.");
+    public final DoubleOption superheatingHeatTransfer = new DoubleOption(this, "SuperheatingHeatTransfer", 16_000_000D,
+            "Amount of heat each Boiler heating element produces.", 0.1D, 1_024_000_000D);
 
-    public final DoubleOption heatPerFuelTick = new DoubleOption(this, "HeatPerFuelTick", 4D,
-            "Amount of heat produced per fuel tick of a fuel's burn time in the Fuelwood Heater.");
+    public final DoubleOption boilerWaterConductivity = new DoubleOption(this, "BoilerWaterConductivity", 0.7D,
+            "Water conductivity multiplier used by Thermoelectric Boilers.", 0.01D, 1D);
+
+    public final IntOption boilerWaterPerTank = new IntOption(this, "BoilerWaterPerTank", 16_000,
+            "Water capacity contributed by each block of the Boiler water volume.", 1, Integer.MAX_VALUE);
+
+    public final IntOption boilerSteamPerTank = new IntOption(this, "BoilerSteamPerTank", 160_000,
+            "Steam capacity contributed by each block of the Boiler steam volume.", 1, Integer.MAX_VALUE);
+
+    public final IntOption boilerHeatedCoolantPerTank = new IntOption(this, "BoilerHeatedCoolantPerTank", 256_000,
+            "Heated coolant capacity contributed by each block of the Boiler water volume.", 1, Integer.MAX_VALUE);
+
+    public final IntOption boilerCooledCoolantPerTank = new IntOption(this, "BoilerCooledCoolantPerTank", 256_000,
+            "Cooled coolant capacity contributed by each block of the Boiler steam volume.", 1, Integer.MAX_VALUE);
+
+    public final DoubleOption heatPerFuelTick = new DoubleOption(this, "HeatPerFuelTick", 400D,
+            "Amount of heat produced per fuel tick of a fuel's burn time in the Fuelwood Heater.", 0.1D, 4_000_000D);
+
+    public final IntOption fuelwoodTickMultiplier = new IntOption(this, "FuelwoodTickMultiplier", 1,
+            "Number of fuel ticks consumed by the Fuelwood Heater per game tick.", 1, 1_000);
+
+    public final IntOption evaporationFluidPerTank = new IntOption(this, "EvaporationFluidPerTank", 64_000,
+            "Input fluid capacity contributed by each inner Thermal Evaporation block.", 1, Integer.MAX_VALUE);
+
+    public final IntOption evaporationOutputTankCapacity = new IntOption(this, "EvaporationOutputTankCapacity", 10_000,
+            "Output tank capacity of a Thermal Evaporation Plant.", 1, Integer.MAX_VALUE);
 
     public final BooleanOption allowTransmitterAlloyUpgrade = new BooleanOption(this, "AllowTransmitterAlloyUpgrade", true,
             "Allow right clicking on Cables/Pipes/Tubes with alloys to upgrade the tier.");
@@ -277,18 +317,20 @@ public class GeneralConfig extends BaseConfig {
             "Chance that uranium generates in a chunk. (0 to Disable)", 0, Integer.MAX_VALUE);
     public final IntOption uraniumMaxVeinSize = new IntOption(this, "UraniumVeinSize", 8,
             "Max number of blocks in a uranium vein.", 1, Integer.MAX_VALUE);
-    public final DoubleOption toolBatteryCapacity = new DoubleOption(this, "toolBatteryCapacity", 10000000,
-            "Maximum amount (joules) of energy the Atomic Disassembler can contain", 0, Double.MAX_VALUE).setRequiresGameRestart();
     public final BooleanOption blacklistFlux = new BooleanOption(this, "BlacklistFluxPower", false,
             "Disables Flux Networks power integration. Requires world restart (server-side option in SMP).");
 
     public final IntOption nutritionalPasteMBPerFood = new IntOption(this, "mbPerFood", 50, "How much mB of Nutritional Paste equates to one 'half-food.'");
     public final FloatOption nutritionalPasteSaturation = new FloatOption(this, "saturation", 0.8F, "Saturation level of Nutritional Paste when eaten.");
     public final DoubleOption radiationNegativeEffectsMinSeverity = new DoubleOption(this, "negativeEffectsMinSeverity", 0.1D, "Defines the minimum severity radiation dosage severity (scale of 0 to 1) for which negative effects can take place. Set to 1 to disable negative effects completely.", 0, 1);
-    public final DoubleOption radiationTargetDecayRate = new DoubleOption(this, "targetDecayRate", 0.9995D, "Radiated objects and entities are multiplied by this constant roughly once per second to represent their dosage decay.");
-    public final DoubleOption radiationSourceDecayRate = new DoubleOption(this, "sourceDecayRate", 0.9995D, "Radiation sources are multiplied by this constant roughly once per second to represent their emission decay. At the default rate, it takes roughly 10 hours to remove a 1,000 Sv/h (crazy high) source.");
+    public final DoubleOption radiationTargetDecayRate = new DoubleOption(this, "targetDecayRate", 0.9995D, "Radiated objects and entities are multiplied by this constant roughly once per second to represent their dosage decay.", 0, 1);
+    public final DoubleOption radiationSourceDecayRate = new DoubleOption(this, "sourceDecayRate", 0.9995D, "Radiation sources are multiplied by this constant roughly once per second to represent their emission decay. At the default rate, it takes roughly 10 hours to remove a 1,000 Sv/h (crazy high) source.", 0, 1);
     public final IntOption radiationChunkCheckRadius = new IntOption(this, "chunkCheckRadius", 5, "The radius of chunks checked when running radiation calculations. The algorithm is efficient, but don't abuse it by making this crazy high.", 1, 100);
     public final BooleanOption radiationEnabled = new BooleanOption(this, "radiationEnabled", true, "Enable worldwide radiation effects. Don't be a downer and disable this.");
+    public final BooleanOption radiationDecayTimers = new BooleanOption(this, "enableDecayTimers", true, "Show estimated radiation decay times on radiation measuring tools and HUD modules.");
+    public final IntOption radioactiveWasteBarrelProcessTicks = new IntOption(this, "wasteBarrelProcessTicks", 20, "Number of ticks required for radioactive waste stored in a Radioactive Waste Barrel to decay.", 1, Integer.MAX_VALUE);
+    public final IntOption radioactiveWasteBarrelDecayAmount = new IntOption(this, "wasteBarrelDecayAmount", 1, "Amount of gas in mB that decays each waste barrel process. Set to zero to disable decay.", 0, Integer.MAX_VALUE);
+    public final StringListOption radioactiveWasteBarrelDecayBlacklist = new StringListOption(this, "wasteBarrelDecayBlacklist", new String[]{"plutonium", "polonium"}, "Gas registry names that do not decay inside Radioactive Waste Barrels.");
 
     public final StringListOption validOredictionificatorFilters = new StringListOption(this, "validItemFilters", new String[]{"ingot", "ore", "dust", "nugget"}, "The list of valid tag prefixes for the Oredictionificator. Note: It is highly recommended to only include well known/defined tag prefixes otherwise it is very easy to potentially add in accidental conversions of things that are not actually equivalent.").setRequiresGameRestart();
 
@@ -304,9 +346,10 @@ public class GeneralConfig extends BaseConfig {
 
     public final DoubleOption dumpExcessKeepRatio = new DoubleOption(this, "dumpExcessKeepRatio", 0.9D, "The percentage of a tank's capacity to leave contents in when set to dumping excess.", 0.001D, 1D);
 
-    public final IntSetOption defaultAmbientDimBlacklist = new IntSetOption(this,"defaultAmbientDimBlacklist",new int[]{},"Default dimension gas collection recipe where the environmental collector does not work").setRequiresGameRestart();
+    public final IntSetOption defaultAmbientDimBlacklist = new IntSetOption(this, "defaultAmbientDimBlacklist", new int[]{}, "Default dimension gas collection recipe where the environmental collector does not work").setRequiresGameRestart();
 
-    public final BooleanOption EnableDefaultAllAddAmbientGas = new BooleanOption(this,"EnableDefaultAllAddAmbientGas",true,"Enable the recipe to register the default environment collector for all dimensions").setRequiresGameRestart();
+    public final BooleanOption EnableDefaultAllAddAmbientGas = new BooleanOption(this, "EnableDefaultAllAddAmbientGas", true, "Enable the recipe to register the default environment collector for all dimensions").setRequiresGameRestart();
+
     @Override
     public String getCategory() {
         return "general";

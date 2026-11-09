@@ -6,15 +6,17 @@ import it.unimi.dsi.fastutil.longs.Long2DoubleArrayMap;
 import it.unimi.dsi.fastutil.longs.Long2DoubleMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
-import mekanism.api.Chunk3D;
-import mekanism.api.Coord4D;
-import mekanism.api.IMekWrench;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.*;
+import mekanism.api.energy.IEnergyContainer;
 import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
 import mekanism.api.transmitters.TransmissionType;
-import mekanism.common.*;
+import mekanism.common.Mekanism;
+import mekanism.common.MekanismBlocks;
+import mekanism.common.MekanismFluids;
+import mekanism.common.Upgrade;
 import mekanism.common.base.*;
+import mekanism.common.base.IBoundingBlock.BoundingBlockData;
 import mekanism.common.base.IFactory.RecipeType;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.block.states.BlockStateTransmitter.TransmitterType;
@@ -23,7 +25,7 @@ import mekanism.common.integration.forgeenergy.FEIntegration;
 import mekanism.common.integration.ic2.IC2Integration;
 import mekanism.common.integration.redstoneflux.RFIntegration;
 import mekanism.common.integration.tesla.TeslaIntegration;
-import mekanism.common.item.ItemBlockGasTank;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.item.ItemBlockTransmitter;
 import mekanism.common.tier.BaseTier;
 import mekanism.common.tier.FactoryTier;
@@ -31,7 +33,6 @@ import mekanism.common.tier.GasTankTier;
 import mekanism.common.tile.TileEntityAdvancedBoundingBlock;
 import mekanism.common.tile.TileEntityBoundingBlock;
 import mekanism.common.tile.base.TileEntitySynchronized;
-import mekanism.common.tile.component.SideConfig;
 import mekanism.common.util.UnitDisplayUtils.ElectricUnit;
 import mekanism.common.util.UnitDisplayUtils.TemperatureUnit;
 import net.minecraft.advancements.CriteriaTriggers;
@@ -90,6 +91,16 @@ public final class MekanismUtils {
     public static final ThreadLocal<Boolean> isInjecting = ThreadLocal.withInitial(() -> false);
 
     private static final List<UUID> warnedFails = new ArrayList<>();
+
+    public static void logMismatchedStackSize(long actual, long expected) {
+        if (expected != actual) {
+            Mekanism.logger.error("Stack size changed by a different amount ({}) than requested ({}).", actual, expected);
+            if (MekanismAPI.debug) {
+                Mekanism.logger.error("Location ", new Exception());
+            }
+        }
+    }
+
     /**
      * Pre-calculated cache of translated block orientations
      */
@@ -109,7 +120,12 @@ public final class MekanismUtils {
      * @return empty gas tank
      */
     public static ItemStack getEmptyGasTank(GasTankTier tier) {
-        return ((ItemBlockGasTank) new ItemStack(MekanismBlocks.GasTank).getItem()).getEmptyItem(tier);
+        ItemStack empty = new ItemStack(MekanismBlocks.GasTank);
+        if (empty.getItem() instanceof ITierItem tierItem) {
+            tierItem.setBaseTier(empty, tier.getBaseTier());
+        }
+        GasInventorySlot.setGasContained(empty, null);
+        return empty;
     }
 
     public static ItemStack getTransmitter(TransmitterType type, BaseTier tier, int amount) {
@@ -128,13 +144,18 @@ public final class MekanismUtils {
      */
     public static ItemStack getFactory(FactoryTier tier, RecipeType type) {
         ItemStack itemstack;
-        if (tier == FactoryTier.ULTIMATE || tier == FactoryTier.CREATIVE) {
+        if (tier == FactoryTier.ULTIMATE) {
             itemstack = new ItemStack(MekanismBlocks.MachineBlock3, 1, 4 + tier.ordinal());
         } else {
             itemstack = new ItemStack(MekanismBlocks.MachineBlock, 1, MachineType.BASIC_FACTORY.ordinal() + tier.ordinal());
         }
         ((IFactory) itemstack.getItem()).setRecipeType(type.ordinal(), itemstack);
         return itemstack;
+    }
+
+    public static String getModId(ItemStack stack) {
+        ResourceLocation registryName = stack.getItem().getRegistryName();
+        return registryName == null ? "" : registryName.getNamespace();
     }
 
     /**
@@ -250,16 +271,8 @@ public final class MekanismUtils {
      * @param direction - side to increment output of
      */
     public static void incrementOutput(ISideConfiguration config, TransmissionType type, EnumFacing direction) {
-        ArrayList<SideData> outputs = config.getConfig().getOutputs(type);
-        SideConfig sideConfig = config.getConfig().getConfig(type);
-        int max = outputs.size() - 1;
-        if (sideConfig.get(direction) != -1) {
-            int current = outputs.indexOf(outputs.get(sideConfig.get(direction)));
-            if (current < max) {
-                sideConfig.set(direction, (byte) (current + 1));
-            } else if (current == max) {
-                sideConfig.set(direction, (byte) 0);
-            }
+        if (config.getConfig().isSideEnabled(type, direction)) {
+            config.getConfig().incrementOutput(type, direction);
             assert config instanceof TileEntity;
             TileEntity tile = (TileEntity) config;
             tile.markDirty();
@@ -274,16 +287,8 @@ public final class MekanismUtils {
      * @param direction - side to increment output of
      */
     public static void decrementOutput(ISideConfiguration config, TransmissionType type, EnumFacing direction) {
-        ArrayList<SideData> outputs = config.getConfig().getOutputs(type);
-        SideConfig sideConfig = config.getConfig().getConfig(type);
-        int max = outputs.size() - 1;
-        if (sideConfig.get(direction) != -1) {
-            int current = outputs.indexOf(outputs.get(sideConfig.get(direction)));
-            if (current > 0) {
-                sideConfig.set(direction, (byte) (current - 1));
-            } else if (current == 0) {
-                sideConfig.set(direction, (byte) max);
-            }
+        if (config.getConfig().isSideEnabled(type, direction)) {
+            config.getConfig().decrementOutput(type, direction);
             assert config instanceof TileEntity;
             TileEntity tile = (TileEntity) config;
             tile.markDirty();
@@ -291,7 +296,11 @@ public final class MekanismUtils {
     }
 
     public static float fractionUpgrades(IUpgradeTile mgmt, Upgrade type) {
-        return (float) mgmt.getComponent().getUpgrades(type) / (float) type.getMaxInstalled();
+        if (mgmt == null || type == null) {
+            return 0;
+        }
+        int maxInstalled = type.getMaxInstalled();
+        return maxInstalled <= 0 ? 0 : (float) mgmt.getInstalledUpgrades(type) / (float) maxInstalled;
     }
 
     /**
@@ -350,15 +359,26 @@ public final class MekanismUtils {
         return def * Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), fractionUpgrades(mgmt, Upgrade.SPEED));
     }
 
+
+    public static double getGasPerTickMeanMultiplier(IUpgradeTile tile) {
+        if (tile.supportsUpgrades()) {
+            if (tile.supportsUpgrade(Upgrade.GAS)) {
+                return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), 2 * fractionUpgrades(tile, Upgrade.SPEED) - fractionUpgrades(tile, Upgrade.GAS));
+            }
+            return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), fractionUpgrades(tile, Upgrade.SPEED));
+        }
+        return 1;
+    }
+
     public static long getBaseUsage(IUpgradeTile tile, int def) {
         if (tile.supportsUpgrades()) {
             //getGasPerTickMean * required ticks (not rounded)
             if (tile.supportsUpgrade(Upgrade.GAS)) {
-                // def * (upgradeMultiplier ^ ((2 * speed - gas) / 8)) * (upgradeMultiplier ^ (-speed / 8)) =
-                // def * upgradeMultiplier ^ ((speed - gas) / 8)
+                // def * (upgradeMultiplier ^ (2 * speed - gas)) * (upgradeMultiplier ^ -speed) =
+                // def * upgradeMultiplier ^ (speed - gas)
                 //TODO: We may want to validate this provides the numbers we desire if we ever end up with any machines
                 // that use this that are not statistical and have gas upgrades so would go through this code path
-                return Math.round(def * Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(),   fractionUpgrades(tile, Upgrade.SPEED) - fractionUpgrades(tile, Upgrade.GAS)));
+                return Math.round(def * Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), fractionUpgrades(tile, Upgrade.SPEED) - fractionUpgrades(tile, Upgrade.GAS)));
             }
         }
         return def;
@@ -388,9 +408,10 @@ public final class MekanismUtils {
      * @return max energy
      */
     public static double getMaxEnergy(ItemStack itemStack, double def) {
-        Map<Upgrade, Integer> upgrades = Upgrade.buildMap(ItemDataUtils.getDataMap(itemStack));
+        Map<Upgrade, Integer> upgrades = Upgrade.buildComponentMap(ItemDataUtils.getDataMapIfPresent(itemStack));
         float numUpgrades = upgrades.get(Upgrade.ENERGY) == null ? 0 : (float) upgrades.get(Upgrade.ENERGY);
-        return def * Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), numUpgrades / (float) Upgrade.ENERGY.getMaxInstalled());
+        int maxInstalled = Upgrade.ENERGY.getMaxInstalled();
+        return def * Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), maxInstalled <= 0 ? 0 : numUpgrades / (float) maxInstalled);
     }
 
 
@@ -495,9 +516,8 @@ public final class MekanismUtils {
      * @param orig             - original block
      */
     public static void makeBoundingBlock(World world, BlockPos boundingLocation, Coord4D orig) {
-        world.setBlockState(boundingLocation, MekanismBlocks.BoundingBlock.getStateFromMeta(0));
-        if (!world.isRemote) {
-            ((TileEntityBoundingBlock) world.getTileEntity(boundingLocation)).setMainLocation(orig.getPos());
+        if (!tryMakeBoundingBlock(world, boundingLocation, orig, false)) {
+            Mekanism.logger.warn("Unable to place bounding block for {} at {}", orig, boundingLocation);
         }
     }
 
@@ -509,10 +529,108 @@ public final class MekanismUtils {
      * @param orig             - original block
      */
     public static void makeAdvancedBoundingBlock(World world, BlockPos boundingLocation, Coord4D orig) {
-        world.setBlockState(boundingLocation, MekanismBlocks.BoundingBlock.getStateFromMeta(1));
-        if (!world.isRemote) {
-            ((TileEntityAdvancedBoundingBlock) world.getTileEntity(boundingLocation)).setMainLocation(orig.getPos());
+        if (!tryMakeBoundingBlock(world, boundingLocation, orig, true)) {
+            Mekanism.logger.warn("Unable to place advanced bounding block for {} at {}", orig, boundingLocation);
         }
+    }
+
+    /**
+     * Places an entire bounding layout atomically with respect to the preflight check.
+     */
+    public static boolean tryPlaceBoundingBlocks(@Nonnull World world, @Nonnull Coord4D orig, @Nonnull List<BoundingBlockData> blocks) {
+        BlockPos mainPos = orig.getPos();
+        Set<BlockPos> uniquePositions = new HashSet<>();
+        for (BoundingBlockData block : blocks) {
+            BlockPos position = block.getPosition();
+            if (mainPos.equals(position) || !uniquePositions.add(position) || !isValidBoundingBlockPosition(world, position, mainPos)) {
+                return false;
+            }
+        }
+
+        List<BlockPos> placed = new ArrayList<>(blocks.size());
+        for (BoundingBlockData block : blocks) {
+            BlockPos position = block.getPosition();
+            boolean alreadyLinked = isLinkedBoundingBlock(world, position, mainPos);
+            if (!tryMakeBoundingBlock(world, position, orig, block.isAdvanced())) {
+                for (BlockPos placedPosition : placed) {
+                    removeBoundingBlock(world, placedPosition, mainPos);
+                }
+                return false;
+            }
+            if (!alreadyLinked) {
+                placed.add(position);
+            }
+        }
+        for (BoundingBlockData block : blocks) {
+            world.notifyNeighborsOfStateChange(block.getPosition(), world.getBlockState(mainPos).getBlock(), true);
+        }
+        return true;
+    }
+
+    /**
+     * True when a location is loaded, in bounds, and replaceable without data loss.
+     */
+    public static boolean isValidBoundingBlockPosition(@Nonnull World world, @Nonnull BlockPos position, @Nonnull BlockPos mainPos) {
+        if (!world.isValid(position) || !world.isBlockLoaded(position, false)) {
+            return false;
+        }
+        if (isLinkedBoundingBlock(world, position, mainPos)) {
+            return true;
+        }
+        IBlockState state = world.getBlockState(position);
+        return state.getBlock().isReplaceable(world, position);
+    }
+
+    /**
+     * Removes only auxiliary blocks whose stored main position matches this machine.
+     */
+    public static void removeBoundingBlocks(@Nonnull World world, @Nonnull BlockPos mainPos, @Nonnull List<BoundingBlockData> blocks) {
+        Set<BlockPos> handled = new HashSet<>();
+        for (BoundingBlockData block : blocks) {
+            BlockPos position = block.getPosition();
+            if (handled.add(position)) {
+                removeBoundingBlock(world, position, mainPos);
+            }
+        }
+    }
+
+    private static boolean tryMakeBoundingBlock(World world, BlockPos boundingLocation, Coord4D orig, boolean advanced) {
+        BlockPos mainPos = orig.getPos();
+        if (isLinkedBoundingBlock(world, boundingLocation, mainPos)) {
+            return true;
+        }
+        if (!isValidBoundingBlockPosition(world, boundingLocation, mainPos)) {
+            return false;
+        }
+        IBlockState boundingState = MekanismBlocks.BoundingBlock.getStateFromMeta(advanced ? 1 : 0);
+        if (!world.setBlockState(boundingLocation, boundingState)) {
+            return false;
+        }
+        TileEntity tile = world.getTileEntity(boundingLocation);
+        if (tile instanceof TileEntityBoundingBlock block && (!advanced || tile instanceof TileEntityAdvancedBoundingBlock)) {
+            block.setMainLocation(mainPos);
+            return true;
+        }
+        world.removeTileEntity(boundingLocation);
+        world.setBlockToAir(boundingLocation);
+        return false;
+    }
+
+    private static boolean isLinkedBoundingBlock(World world, BlockPos position, BlockPos mainPos) {
+        if (!world.isBlockLoaded(position, false) || world.getBlockState(position).getBlock() != MekanismBlocks.BoundingBlock) {
+            return false;
+        }
+        TileEntity tile = world.getTileEntity(position);
+        return tile instanceof TileEntityBoundingBlock block && block.receivedCoords && mainPos.equals(block.getMainPos());
+    }
+
+    private static void removeBoundingBlock(World world, BlockPos position, BlockPos mainPos) {
+        if (!world.isBlockLoaded(position, false) || !isLinkedBoundingBlock(world, position, mainPos)) {
+            return;
+        }
+        // Remove the tile first so BlockBounding does not proxy removal back to the main block.
+        world.removeTileEntity(position);
+        world.setBlockToAir(position);
     }
 
     /**
@@ -631,8 +749,16 @@ public final class MekanismUtils {
      * @apiNote Should only be used from the server side
      */
     public static void openItemGui(EntityPlayer player, EnumHand hand, int guiID) {
-        //current item, hand, gui type
-        player.openGui(Mekanism.instance, 0, player.world, player.inventory.currentItem, hand.ordinal(), guiID);
+        openItemGui(player, hand, mekanism.common.inventory.container.item.ItemStackSlotAccess.getSlotForHand(player.inventory, hand), guiID);
+    }
+
+    /**
+     * Opens an item GUI using the inventory slot captured by the original
+     * container. Used when switching between screens for the same item.
+     */
+    public static void openItemGui(EntityPlayer player, EnumHand hand, int itemSlot, int guiID) {
+        //item slot, hand, gui type
+        player.openGui(Mekanism.instance, 0, player.world, itemSlot, hand.ordinal(), guiID);
     }
 
     /**
@@ -669,7 +795,11 @@ public final class MekanismUtils {
         if (tileEntity == null || tileEntity.isInvalid() || tileEntity.getWorld() == null) {
             return;
         }
-        tileEntity.getWorld().markChunkDirty(tileEntity.getPos(), tileEntity);
+        if (tileEntity instanceof TileEntitySynchronized synchronizedTile) {
+            synchronizedTile.markForSave();
+        } else {
+            tileEntity.getWorld().markChunkDirty(tileEntity.getPos(), tileEntity);
+        }
     }
 
     /**
@@ -795,13 +925,24 @@ public final class MekanismUtils {
      * @return rounded energy display
      */
     public static String getTemperatureDisplay(double T, TemperatureUnit unit) {
+        return getTemperatureDisplay(T, unit, true);
+    }
+
+    /**
+     * Formats either an absolute temperature or a temperature interval using the configured display unit.
+     *
+     * @param T     temperature expressed in {@code unit}
+     * @param unit  unit the supplied temperature is expressed in
+     * @param shift whether the display unit's zero offset should be applied
+     */
+    public static String getTemperatureDisplay(double T, TemperatureUnit unit, boolean shift) {
         double TK = unit.convertToK(T, true);
         return switch (MekanismConfig.current().general.tempUnit.val()) {
-            case K -> UnitDisplayUtils.getDisplayShort(TK, TemperatureUnit.KELVIN);
-            case C -> UnitDisplayUtils.getDisplayShort(TK, TemperatureUnit.CELSIUS);
-            case R -> UnitDisplayUtils.getDisplayShort(TK, TemperatureUnit.RANKINE);
-            case F -> UnitDisplayUtils.getDisplayShort(TK, TemperatureUnit.FAHRENHEIT);
-            case STP -> UnitDisplayUtils.getDisplayShort(TK, TemperatureUnit.AMBIENT);
+            case K -> UnitDisplayUtils.getDisplayShort(TK, shift, TemperatureUnit.KELVIN);
+            case C -> UnitDisplayUtils.getDisplayShort(TK, shift, TemperatureUnit.CELSIUS);
+            case R -> UnitDisplayUtils.getDisplayShort(TK, shift, TemperatureUnit.RANKINE);
+            case F -> UnitDisplayUtils.getDisplayShort(TK, shift, TemperatureUnit.FAHRENHEIT);
+            case STP -> UnitDisplayUtils.getDisplayShort(TK, shift, TemperatureUnit.AMBIENT);
         };
     }
 
@@ -811,7 +952,7 @@ public final class MekanismUtils {
      * @return if IC2 power should be used
      */
     public static boolean useIC2() {
-        return Mekanism.hooks.IC2Loaded  && !MekanismConfig.current().general.blacklistIC2.val() && EnergyNet.instance != null;
+        return Mekanism.hooks.IC2Loaded && !MekanismConfig.current().general.blacklistIC2.val() && EnergyNet.instance != null;
     }
 
     /**
@@ -876,8 +1017,7 @@ public final class MekanismUtils {
      */
     public static ItemStack getFullGasTank(GasTankTier tier, Gas gas) {
         ItemStack tank = getEmptyGasTank(tier);
-        ItemBlockGasTank item = (ItemBlockGasTank) tank.getItem();
-        item.setGas(tank, new GasStack(gas, item.MAX_GAS));
+        GasInventorySlot.setGasContained(tank, new GasStack(gas, GasInventorySlot.getTankCapacity(tank, 0)));
         return tank;
     }
 
@@ -1122,18 +1262,40 @@ public final class MekanismUtils {
         return Integer.MAX_VALUE;
     }
 
+    @Nullable
+    public static <TYPE> TYPE getByIndex(TYPE[] elements, int index, @Nullable TYPE fallback) {
+        return index >= 0 && index < elements.length ? elements[index] : fallback;
+    }
+
+    @Nullable
+    public static <TYPE> TYPE getByIndex(List<TYPE> elements, int index, @Nullable TYPE fallback) {
+        return index >= 0 && index < elements.size() ? elements.get(index) : fallback;
+    }
+
+    @Nullable
+    public static UUID parseUUID(@Nullable String uuid) {
+        if (uuid == null || uuid.isEmpty()) {
+            return null;
+        }
+        try {
+            return UUID.fromString(uuid);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
     public static double time(IUpgradeTile tile) {
-        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), tile.getComponent().getUpgrades(Upgrade.SPEED) / -8D);
+        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), -fractionUpgrades(tile, Upgrade.SPEED));
     }
 
     public static double electricity(IUpgradeTile tile) {
-        int speed = tile.getComponent().getUpgrades(Upgrade.SPEED);
-        int energy = tile.getComponent().getUpgrades(Upgrade.ENERGY);
-        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), (2 * speed - Math.min(energy, Math.max(8, speed))) / 8D);
+        double speed = fractionUpgrades(tile, Upgrade.SPEED);
+        double energy = fractionUpgrades(tile, Upgrade.ENERGY);
+        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), 2 * speed - Math.min(energy, Math.max(1D, speed)));
     }
 
     public static double capacity(IUpgradeTile tile) {
-        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), tile.getComponent().getUpgrades(Upgrade.ENERGY) / 8D);
+        return Math.pow(MekanismConfig.current().general.maxUpgradeMultiplier.val(), fractionUpgrades(tile, Upgrade.ENERGY));
     }
 
     public static String exponential(double d) {
@@ -1150,17 +1312,12 @@ public final class MekanismUtils {
         GUI_BUTTON("gui/button"),
         GUI_ICONS("gui/icons"),
         GUI_BAR("gui/bar"),
-        GUI_ELEMENT("gui/elements"),
+        GUI_GAUGE("gui/gauge"),
+        GUI_PROGRESS("gui/progress"),
         GUI_SLOT("gui/slot"),
-        BUTTON("gui/button"),
-        BUTTON_TAB("gui/button_tab"),
+        GUI_TAB("gui/tabs"),
         GUI_RADIAL("gui/radial"),
-        GAUGE("gui/gauge"),
         GUI_HUD("gui/hud"),
-        PROGRESS("gui/progress"),
-        SLOT("gui/slot"),
-        TAB("gui/tab"),
-        SWITCH("gui/switch"),
         SOUND("sound"),
         RENDER("render"),
         TEXTURE_BLOCKS("textures/blocks"),
@@ -1326,10 +1483,10 @@ public final class MekanismUtils {
     }
 
 
-    public static void veinMineArea(IEnergizedItem energyContainer, double energyRequired, World world, BlockPos pos, EntityPlayerMP player, ItemStack stack, Item usedTool,
+    public static void veinMineArea(IEnergyContainer energyContainer, double energyRequired, World world, BlockPos pos, EntityPlayerMP player, ItemStack stack, Item usedTool,
                                     Object2IntMap<BlockPos> found, BlastEnergyFunction blastEnergy, VeinEnergyFunction veinEnergy) {
         double energyUsed = 0;
-        double energyAvailable = energyContainer.getEnergy(stack);
+        double energyAvailable = energyContainer.getEnergy();
         //Subtract from our available energy the amount that we will require to break the target block
         energyAvailable = energyAvailable - (energyRequired);
         for (Object2IntMap.Entry<BlockPos> foundEntry : found.object2IntEntrySet()) {
@@ -1378,10 +1535,8 @@ public final class MekanismUtils {
                 energyUsed = energyUsed + (destroyEnergy);
             }
         }
-        energyContainer.extract(stack, energyUsed, true);
+        energyContainer.extract(energyUsed, Action.EXECUTE, AutomationType.MANUAL);
     }
-
-
 
 
     @FunctionalInterface
@@ -1396,9 +1551,4 @@ public final class MekanismUtils {
     }
 
 
-
-
 }
-
-
-

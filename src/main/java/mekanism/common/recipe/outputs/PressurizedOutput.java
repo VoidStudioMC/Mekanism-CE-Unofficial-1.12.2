@@ -1,20 +1,24 @@
 package mekanism.common.recipe.outputs;
 
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.GasTank;
+import mekanism.api.gas.IExtendedGasTank;
+import mekanism.api.inventory.IInventorySlot;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
-import net.minecraft.util.NonNullList;
-import net.minecraftforge.items.ItemHandlerHelper;
+
+import javax.annotation.Nullable;
 
 public class PressurizedOutput extends MachineOutput<PressurizedOutput> {
 
     private ItemStack itemOutput = ItemStack.EMPTY;
+    @Nullable
     private GasStack gasOutput;
 
-    public PressurizedOutput(ItemStack item, GasStack gas) {
-        itemOutput = item;
-        gasOutput = gas;
+    public PressurizedOutput(@Nullable ItemStack item, @Nullable GasStack gas) {
+        itemOutput = item == null ? ItemStack.EMPTY : item;
+        gasOutput = gas == null || gas.getGas() == null || gas.amount <= 0 ? null : gas;
     }
 
     public PressurizedOutput() {
@@ -24,35 +28,43 @@ public class PressurizedOutput extends MachineOutput<PressurizedOutput> {
     public void load(NBTTagCompound nbtTags) {
         itemOutput = new ItemStack(nbtTags.getCompoundTag("itemOutput"));
         gasOutput = GasStack.readFromNBT(nbtTags.getCompoundTag("gasOutput"));
-    }
-
-    public boolean canFillTank(GasTank tank) {
-        return tank.canReceive(gasOutput.getGas()) && tank.getNeeded() >= gasOutput.amount;
-    }
-
-    public boolean canAddProducts(NonNullList<ItemStack> inventory, int index) {
-        ItemStack stack = inventory.get(index);
-        return stack.isEmpty() || (ItemHandlerHelper.canItemStacksStack(stack, itemOutput) && stack.getCount() + itemOutput.getCount() <= stack.getMaxStackSize());
-    }
-
-    public void fillTank(GasTank tank) {
-        tank.receive(gasOutput, true);
-    }
-
-    public void addProducts(NonNullList<ItemStack> inventory, int index) {
-        ItemStack stack = inventory.get(index);
-        if (stack.isEmpty()) {
-            inventory.set(index, itemOutput.copy());
-        } else if (ItemHandlerHelper.canItemStacksStack(stack, itemOutput)) {
-            stack.grow(itemOutput.getCount());
+        if (gasOutput != null && (gasOutput.getGas() == null || gasOutput.amount <= 0)) {
+            gasOutput = null;
         }
     }
 
-    public boolean applyOutputs(NonNullList<ItemStack> inventory, int index, GasTank tank, boolean doEmit) {
-        if (canFillTank(tank) && canAddProducts(inventory, index)) {
+    public boolean canFillTank(IExtendedGasTank tank) {
+        if (gasOutput == null) {
+            return true;
+        }
+        GasStack remainder = tank.insert(gasOutput, Action.SIMULATE, AutomationType.INTERNAL);
+        return remainder == null || remainder.amount <= 0;
+    }
+
+    public boolean canAddProducts(IInventorySlot slot) {
+        if (itemOutput.isEmpty()) {
+            return true;
+        }
+        return slot.insertItem(itemOutput, Action.SIMULATE, AutomationType.INTERNAL).isEmpty();
+    }
+
+    public void fillTank(IExtendedGasTank tank) {
+        if (gasOutput != null) {
+            tank.insert(gasOutput, Action.EXECUTE, AutomationType.INTERNAL);
+        }
+    }
+
+    public void addProducts(IInventorySlot slot) {
+        if (!itemOutput.isEmpty()) {
+            slot.insertItem(itemOutput, Action.EXECUTE, AutomationType.INTERNAL);
+        }
+    }
+
+    public boolean applyOutputs(IInventorySlot slot, IExtendedGasTank tank, boolean doEmit) {
+        if (canFillTank(tank) && canAddProducts(slot)) {
             if (doEmit) {
                 fillTank(tank);
-                addProducts(inventory, index);
+                addProducts(slot);
             }
             return true;
         }
@@ -63,12 +75,13 @@ public class PressurizedOutput extends MachineOutput<PressurizedOutput> {
         return itemOutput;
     }
 
+    @Nullable
     public GasStack getGasOutput() {
         return gasOutput;
     }
 
     @Override
     public PressurizedOutput copy() {
-        return new PressurizedOutput(itemOutput.copy(), gasOutput.copy());
+        return new PressurizedOutput(itemOutput.copy(), gasOutput == null ? null : gasOutput.copy());
     }
 }

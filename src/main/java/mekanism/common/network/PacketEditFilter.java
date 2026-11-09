@@ -3,17 +3,15 @@ package mekanism.common.network;
 import io.netty.buffer.ByteBuf;
 import mekanism.api.Coord4D;
 import mekanism.api.TileNetworkList;
-import mekanism.common.Mekanism;
 import mekanism.common.PacketHandler;
+import mekanism.common.content.filter.IFilter;
 import mekanism.common.content.miner.MinerFilter;
 import mekanism.common.content.transporter.TransporterFilter;
 import mekanism.common.network.PacketEditFilter.EditFilterMessage;
-import mekanism.common.network.PacketTileEntity.TileEntityMessage;
-import mekanism.common.tile.TileEntityLogisticalSorter;
-import mekanism.common.tile.machine.TileEntityDigitalMiner;
-import mekanism.common.tile.machine.TileEntityOredictionificator;
+import mekanism.common.tile.interfaces.ITileFilterHolder;
 import mekanism.common.tile.machine.TileEntityOredictionificator.OredictionificatorFilter;
 import net.minecraft.entity.player.EntityPlayerMP;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
@@ -24,41 +22,21 @@ public class PacketEditFilter implements IMessageHandler<EditFilterMessage, IMes
 
     @Override
     public IMessage onMessage(EditFilterMessage message, MessageContext context) {
+        EntityPlayerMP player = context.getServerHandler().player;
+        if (player == null) {
+            return null;
+        }
         WorldServer worldServer = FMLCommonHandler.instance().getMinecraftServerInstance().getWorld(message.coord4D.dimensionId);
+        if (worldServer == null) {
+            return null;
+        }
 
         worldServer.addScheduledTask(() -> {
-            if (message.type == 0 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityLogisticalSorter sorter) {
-
-                if (!sorter.filters.contains(message.tFilter)) {
-                    return;
-                }
-                int index = sorter.filters.indexOf(message.tFilter);
-                sorter.filters.remove(index);
-                if (!message.delete) {
-                    sorter.filters.add(index, message.tEdited);
-                }
-                sorter.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(sorter, sorter.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
-            } else if (message.type == 1 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityDigitalMiner miner) {
-
-                if (!miner.filters.contains(message.mFilter)) {
-                    return;
-                }
-                int index = miner.filters.indexOf(message.mFilter);
-                miner.filters.remove(index);
-                if (!message.delete) {
-                    miner.filters.add(index, message.mEdited);
-                }
-                miner.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(miner, miner.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
-            } else if (message.type == 2 && message.coord4D.getTileEntity(worldServer) instanceof TileEntityOredictionificator oredictionificator) {
-                if (!oredictionificator.filters.contains(message.oFilter)) {
-                    return;
-                }
-                int index = oredictionificator.filters.indexOf(message.oFilter);
-                oredictionificator.filters.remove(index);
-                if (!message.delete) {
-                    oredictionificator.filters.add(index, message.oEdited);
-                }
-                oredictionificator.playersUsing.forEach(iterPlayer -> Mekanism.packetHandler.sendTo(new TileEntityMessage(oredictionificator, oredictionificator.getFilterPacket(new TileNetworkList())), (EntityPlayerMP) iterPlayer));
+            TileEntity tile = message.coord4D.getTileEntity(worldServer);
+            IFilter filter = message.getFilter();
+            IFilter edited = message.getEdited();
+            if (tile instanceof ITileFilterHolder<?> filterHolder && PacketHandler.canAccessTile(player, tile) && filter != null && (message.delete || edited != null)) {
+                filterHolder.getFilterManager().tryEditFilter(filter, message.delete ? null : edited);
             }
         });
         return null;
@@ -107,6 +85,28 @@ public class PacketEditFilter implements IMessageHandler<EditFilterMessage, IMes
                 }
                 type = 2;
             }
+        }
+
+        public IFilter getFilter() {
+            if (type == 0) {
+                return tFilter;
+            } else if (type == 1) {
+                return mFilter;
+            } else if (type == 2) {
+                return oFilter;
+            }
+            return null;
+        }
+
+        public IFilter getEdited() {
+            if (type == 0) {
+                return tEdited;
+            } else if (type == 1) {
+                return mEdited;
+            } else if (type == 2) {
+                return oEdited;
+            }
+            return null;
         }
 
         @Override

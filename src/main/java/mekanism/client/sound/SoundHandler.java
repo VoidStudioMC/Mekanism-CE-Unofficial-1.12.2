@@ -6,6 +6,7 @@ import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import mekanism.client.sound.PlayerSound.SoundType;
 import mekanism.common.Mekanism;
 import mekanism.common.Upgrade;
+import mekanism.common.base.IModule;
 import mekanism.common.base.IUpgradeTile;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.lib.radiation.RadiationManager;
@@ -21,6 +22,8 @@ import net.minecraft.world.World;
 import net.minecraftforge.client.ForgeHooksClient;
 import net.minecraftforge.client.event.sound.PlaySoundEvent;
 import net.minecraftforge.client.event.sound.SoundLoadEvent;
+import net.minecraftforge.fml.common.Loader;
+import net.minecraftforge.fml.common.ModContainer;
 import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.relauncher.Side;
@@ -28,10 +31,7 @@ import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import java.util.EnumMap;
-import java.util.Map;
-import java.util.Set;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 
 // SoundHandler is the central point for sounds on Mek client side. There are roughly three classes of sounds to deal
@@ -64,6 +64,8 @@ public class SoundHandler {
     private static boolean IN_MUFFLED_CHECK = false;
     private static SoundManager soundEngine;
     private static boolean hadPlayerSounds;
+    private static Set<String> moduleSoundNamespaces;
+    private static Map<String, Boolean> mekanismSoundNamespaces = new HashMap<>();
 
     public static void clearPlayerSounds() {
         jetpackSounds.clear();
@@ -112,7 +114,7 @@ public class SoundHandler {
                 }
             }
             case GRAVITATIONAL_MODULATOR -> {
-                if (!gravitationalModulationSounds.contains(uuid)){
+                if (!gravitationalModulationSounds.contains(uuid)) {
                     EntityPlayer player = world.getPlayerEntityByUUID(uuid);
                     if (player != null) {
                         gravitationalModulationSounds.add(uuid);
@@ -181,11 +183,6 @@ public class SoundHandler {
     }
 
 
-
-
-
-
-
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onTilePlaySound(PlaySoundEvent event) {
         // Ignore any sound event which is null or is happening in a muffled check
@@ -194,9 +191,9 @@ public class SoundHandler {
             return;
         }
 
-        // Ignore any sound event outside this mod namespace
+        // Ignore any sound event outside Mekanism namespaces
         ResourceLocation soundLoc = event.getSound().getSoundLocation();
-        if (!soundLoc.getNamespace().equals(Mekanism.MODID)) {
+        if (!isMekanismSound(soundLoc)) {
             return;
         }
 
@@ -224,6 +221,27 @@ public class SoundHandler {
         // Aside: I really, really, wish Forge returned the final result sound as part of playSound :/
         BlockPos pos = new BlockPos(resultSound.getXPosF() - 0.5f, resultSound.getYPosF() - 0.5f, resultSound.getZPosF() - 0.5);
         soundMap.put(pos.toLong(), resultSound);
+    }
+
+    private static boolean isMekanismSound(ResourceLocation soundLoc) {
+        String namespace = soundLoc.getNamespace();
+        if (namespace == null) {
+            return false;
+        }
+        return mekanismSoundNamespaces.computeIfAbsent(namespace, key -> key.equals(Mekanism.MODID) || getModuleSoundNamespaces().contains(key));
+    }
+
+    private static Set<String> getModuleSoundNamespaces() {
+        if (moduleSoundNamespaces == null) {
+            moduleSoundNamespaces = Mekanism.modulesLoaded.stream()
+                    .map(IModule::getClass)
+                    .flatMap(moduleClass -> Loader.instance().getActiveModList().stream()
+                            .filter(container -> container.getMod() != null && container.getMod().getClass() == moduleClass))
+                    .map(ModContainer::getModId)
+                    .filter(modId -> modId != null)
+                    .collect(java.util.stream.Collectors.toSet());
+        }
+        return moduleSoundNamespaces;
     }
 
     private static class TileSound implements ITickableSound {
@@ -274,8 +292,12 @@ public class SoundHandler {
             // percentage of the original volume should be muted
             TileEntity te = mc.world.getTileEntity(new BlockPos(original.getXPosF(), original.getYPosF(), original.getZPosF()));
             if (te instanceof IUpgradeTile tile && tile.supportsUpgrade(Upgrade.MUFFLING)) {
-                int mufflerCount = tile.getComponent().getUpgrades(Upgrade.MUFFLING);
-                return 1.0f - (mufflerCount / (float) Upgrade.MUFFLING.getMaxInstalled());
+                int maxInstalled = Upgrade.MUFFLING.getMaxInstalled();
+                if (maxInstalled <= 0) {
+                    return 1.0f;
+                }
+                int mufflerCount = tile.getInstalledUpgrades(Upgrade.MUFFLING);
+                return 1.0f - (mufflerCount / (float) maxInstalled);
             }
             return 1.0f;
         }

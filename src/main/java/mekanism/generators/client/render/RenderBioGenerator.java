@@ -30,11 +30,13 @@ public class RenderBioGenerator extends TileEntitySpecialRenderer<TileEntityBioG
 
     private ModelBioGenerator model = new ModelBioGenerator();
 
-    private static final int stages = 800;
+    private static final int stages = TileEntityBioGenerator.RENDER_STAGES;
 
     public static void resetDisplayInts() {
+        energyDisplays.values().forEach(DisplayInteger::deleteAll);
         energyDisplays.clear();
     }
+
     @Override
     public void render(TileEntityBioGenerator tileEntity, double x, double y, double z, float partialTick, int destroyStage, float alpha) {
         GlStateManager.pushMatrix();
@@ -44,7 +46,7 @@ public class RenderBioGenerator extends TileEntitySpecialRenderer<TileEntityBioG
         GlStateManager.rotate(180, 0, 0, 1);
         model.render(0.0625F);
         GlStateManager.popMatrix();
-        if (tileEntity.bioFuelSlot.fluidStored > 0) {
+        if (tileEntity.bioFuelTank.getFluidAmount() > 0) {
             GlStateManager.pushMatrix();
             GlStateManager.enableCull();
             GlStateManager.disableAlpha();
@@ -83,7 +85,7 @@ public class RenderBioGenerator extends TileEntitySpecialRenderer<TileEntityBioG
         model3D.baseBlock = Blocks.WATER;
         model3D.setTexture(MekanismFluids.Biofuel.getSprite());
         DisplayInteger[] displays = new DisplayInteger[stages];
-        energyDisplays.put(side,displays);
+        energyDisplays.put(side, displays);
         for (int i = 0; i < stages; i++) {
             displays[i] = DisplayInteger.createAndStart();
             switch (side) {

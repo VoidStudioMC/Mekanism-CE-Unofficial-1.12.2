@@ -1,13 +1,16 @@
 package mekanism.common.item;
 
 import com.google.common.collect.Multimap;
+import com.wdcftgg.farmersdelightlegacy.api.knife.IKnifeItem;
 import it.unimi.dsi.fastutil.objects.Object2IntArrayMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Reference2BooleanArrayMap;
 import it.unimi.dsi.fastutil.objects.Reference2BooleanMap;
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.Coord4D;
 import mekanism.api.EnumColor;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.energy.IEnergyContainer;
 import mekanism.api.gear.ICustomModule;
 import mekanism.api.gear.IModule;
 import mekanism.api.gear.Magnetic;
@@ -27,11 +30,13 @@ import mekanism.common.content.gear.Module;
 import mekanism.common.content.gear.mekatool.*;
 import mekanism.common.content.gear.shared.ModuleEnergyUnit;
 import mekanism.common.entity.EntityMeka;
+import mekanism.common.integration.MekanismHooks;
 import mekanism.common.lib.radial.IGenericRadialModeItem;
 import mekanism.common.lib.radial.data.NestingRadialData;
 import mekanism.common.network.PacketPortalFX;
 import mekanism.common.util.LangUtils;
 import mekanism.common.util.MekanismUtils;
+import mekanism.common.util.StorageUtils;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockLiquid;
 import net.minecraft.block.BlockTripWire;
@@ -59,6 +64,8 @@ import net.minecraft.util.text.ITextComponent;
 import net.minecraft.world.World;
 import net.minecraftforge.common.util.Constants;
 import net.minecraftforge.fluids.IFluidBlock;
+import net.minecraftforge.fml.common.Optional.Interface;
+import net.minecraftforge.fml.common.Optional.Method;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.jetbrains.annotations.NotNull;
@@ -69,13 +76,15 @@ import java.util.*;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
-public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem, IGenericRadialModeItem, Magnetic, IBlastingItem {
+@Interface(iface = "com.wdcftgg.farmersdelightlegacy.api.knife.IKnifeItem", modid = MekanismHooks.FARMERS_DELIGHT_LEGACY_MOD_ID)
+public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem, IGenericRadialModeItem, Magnetic, IBlastingItem, IKnifeItem {
 
     private static final ResourceLocation RADIAL_ID = Mekanism.rl("meka_tool");
+    private static final double CUTTING_BOARD_RECIPE_ENERGY_USAGE = 50;
 
 
     public ItemMekaTool() {
-        super(MekanismConfig.current().general.toolBatteryCapacity.val());
+        super(MekanismConfig.current().meka.mekaToolBaseEnergyCapacity.val());
         setRarity(EnumRarity.EPIC);
         setMaxStackSize(1);
         setNoRepair();
@@ -89,11 +98,11 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
         ItemStack discharged = new ItemStack(this);
         list.add(discharged);
         ItemStack charged = new ItemStack(this);
-        setEnergy(charged, ((IEnergizedItem) charged.getItem()).getMaxEnergy(charged));
+        StorageUtils.setStoredEnergy(charged, getEnergyCapacity(charged));
         list.add(charged);
         ItemStack FullStack = new ItemStack(this);
         setAllModule(FullStack);
-        setEnergy(FullStack, ((IEnergizedItem) FullStack.getItem()).getMaxEnergy(FullStack));
+        StorageUtils.setStoredEnergy(FullStack, getEnergyCapacity(FullStack));
         list.add(FullStack);
     }
 
@@ -105,12 +114,37 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
     }
 
     @Override
+    @Method(modid = MekanismHooks.FARMERS_DELIGHT_LEGACY_MOD_ID)
+    public ItemStack getKnifeJeiInfoStack(ItemStack stack) {
+        return MekanismModules.LASER_CUTTER_UNIT.getStack();
+    }
+
+
+    @Override
+    @Method(modid = MekanismHooks.FARMERS_DELIGHT_LEGACY_MOD_ID)
+    public boolean canProcessCuttingBoardRecipe(ItemStack stack, World world, BlockPos pos, IBlockState state, EntityPlayer player, ItemStack inputStack) {
+        return StorageUtils.getStoredEnergy(stack) >= CUTTING_BOARD_RECIPE_ENERGY_USAGE && hasCuttingBoardRecipeModule(stack);
+    }
+
+    @Override
+    @Method(modid = MekanismHooks.FARMERS_DELIGHT_LEGACY_MOD_ID)
+    public void onCuttingBoardRecipeProcessed(ItemStack stack, World world, EntityPlayer player) {
+        if (StorageUtils.getStoredEnergy(stack) >= CUTTING_BOARD_RECIPE_ENERGY_USAGE) {
+            StorageUtils.extractFromContainer(stack, CUTTING_BOARD_RECIPE_ENERGY_USAGE, Action.EXECUTE);
+        }
+    }
+
+    private boolean hasCuttingBoardRecipeModule(ItemStack stack) {
+        return isModuleEnabled(stack, MekanismModules.LASER_CUTTER_UNIT);
+    }
+
+    @Override
     @SideOnly(Side.CLIENT)
     public void addInformation(ItemStack stack, World world, List<String> tooltip, ITooltipFlag flag) {
         if (MekKeyHandler.getIsKeyPressed(MekanismKeyHandler.sneakKey)) {
             addModuleDetails(stack, tooltip);
         } else {
-            tooltip.add(EnumColor.AQUA + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(getEnergy(stack), getMaxEnergy(stack)));
+            tooltip.add(EnumColor.AQUA + LangUtils.localize("tooltip.storedEnergy") + ": " + EnumColor.GREY + MekanismUtils.getEnergyDisplay(StorageUtils.getStoredEnergy(stack), getEnergyCapacity(stack)));
             tooltip.add(LangUtils.localize("tooltip.hold") + " " + EnumColor.INDIGO + GameSettings.getKeyDisplayString(MekanismKeyHandler.sneakKey.getKeyCode()) + EnumColor.GREY + " " + LangUtils.localize("tooltip.forDetails") + ".");
         }
     }
@@ -161,14 +195,14 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
 
     @Override
     public float getDestroySpeed(ItemStack stack, IBlockState state) {
-        IEnergizedItem energyContainer = this;
+        IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
         if (energyContainer == null) {
             return 0;
         }
 
         //Use raw hardness to get the best guess of if it is zero or not
         double energyRequired = getDestroyEnergy(stack, state.getBlock().blockHardness, isModuleEnabled(stack, MekanismModules.SILK_TOUCH_UNIT));
-        double energyAvailable = energyContainer.extract(stack, energyRequired, false);
+        double energyAvailable = energyContainer.extract(energyRequired, Action.SIMULATE, AutomationType.MANUAL);
         if (energyAvailable < (energyRequired)) {
             //If we can't extract all the energy we need to break it go at base speed reduced by how much we actually have available
             return (float) (MekanismConfig.current().meka.mekaToolBaseEfficiency.val() * (energyAvailable / (energyRequired)));
@@ -179,10 +213,10 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
 
     @Override
     public boolean onBlockDestroyed(ItemStack stack, World world, IBlockState state, BlockPos pos, EntityLivingBase entity) {
-        IEnergizedItem energyContainer = this;
+        IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
         if (energyContainer != null) {
             double energyRequired = getDestroyEnergy(stack, state.getBlockHardness(world, pos), isModuleEnabled(stack, MekanismModules.SILK_TOUCH_UNIT));
-            double extractedEnergy = energyContainer.extract(stack, energyRequired, true);
+            double extractedEnergy = energyContainer.extract(energyRequired, Action.EXECUTE, AutomationType.MANUAL);
             if (extractedEnergy == (energyRequired) || entity instanceof EntityPlayer player && player.isCreative()) {
                 //Only disarm tripwires if we had all the energy we tried to use (or are creative). Otherwise, treat it as if we may have failed to disarm it
                 if (state.getBlock() == Blocks.TRIPWIRE && !state.getValue(BlockTripWire.DISARMED) && isModuleEnabled(stack, MekanismModules.SHEARING_UNIT)) {
@@ -215,8 +249,71 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
         return Collections.emptyMap();
     }
 
+    @Override
+    public Map<BlockPos, IBlockState> getBlastedBlocksForRendering(World world, EntityPlayer player, ItemStack stack, BlockPos pos, IBlockState state) {
+        VeinMiningTargets targets = getVeinMiningTargets(world, player, stack, pos, state);
+        if (targets == null || targets.getVeinedBlocks().isEmpty()) {
+            return Collections.emptyMap();
+        }
+        Map<BlockPos, IBlockState> blocks = new HashMap<>(targets.getVeinedBlocks().size());
+        for (BlockPos targetPos : targets.getVeinedBlocks().keySet()) {
+            IBlockState targetState = world.getBlockState(targetPos);
+            if (!targetState.getBlock().isAir(targetState, world, targetPos)) {
+                blocks.put(targetPos, targetState);
+            }
+        }
+        return blocks;
+    }
 
-    private Object2IntMap<BlockPos> getVeinedBlocks(World world, ItemStack stack, Map<BlockPos, IBlockState> blocks, Reference2BooleanMap<Block> oreTracker) {
+    public VeinMiningTargets getVeinMiningTargets(World world, EntityPlayer player, ItemStack stack, BlockPos pos, IBlockState state) {
+        Map<BlockPos, IBlockState> blocks = getBlastedBlocks(world, player, stack, pos, state);
+        if (blocks.isEmpty() && ModuleVeinMiningUnit.canVeinBlock(state)) {
+            Map<BlockPos, IBlockState> fallback = new HashMap<>();
+            fallback.put(pos, state);
+            blocks = fallback;
+        }
+        if (blocks.isEmpty()) {
+            return null;
+        }
+        Block block = state.getBlock();
+        if (block == Blocks.LIT_REDSTONE_ORE) {
+            block = Blocks.REDSTONE_ORE;
+        }
+        RayTraceResult raytrace = doRayTrace(state, pos, player);
+        ItemStack pickedStack = block.getPickBlock(state, raytrace, player.world, pos, player);
+        List<String> names = OreDictCache.getOreDictName(pickedStack);
+        boolean isOre = names.stream().anyMatch(s -> s.startsWith("ore") || s.equals("logWood"));
+        Reference2BooleanMap<Block> oreTracker = blocks.values().stream().collect(Collectors.toMap(IBlockState::getBlock, bs -> isOre, (l, r) -> l, Reference2BooleanArrayMap::new));
+        Object2IntMap<BlockPos> veinedBlocks = getVeinedBlocks(world, stack, blocks, oreTracker);
+        return new VeinMiningTargets(oreTracker, veinedBlocks, isOre);
+    }
+
+    public static class VeinMiningTargets {
+        private final Reference2BooleanMap<Block> oreTracker;
+        private final Object2IntMap<BlockPos> veinedBlocks;
+        private final boolean isOre;
+
+        private VeinMiningTargets(Reference2BooleanMap<Block> oreTracker, Object2IntMap<BlockPos> veinedBlocks, boolean isOre) {
+            this.oreTracker = oreTracker;
+            this.veinedBlocks = veinedBlocks;
+            this.isOre = isOre;
+        }
+
+        public Reference2BooleanMap<Block> getOreTracker() {
+            return oreTracker;
+        }
+
+        public Object2IntMap<BlockPos> getVeinedBlocks() {
+            return veinedBlocks;
+        }
+
+        public boolean isOre() {
+            return isOre;
+        }
+    }
+
+
+    public Object2IntMap<BlockPos> getVeinedBlocks(World world, ItemStack stack, Map<BlockPos, IBlockState> blocks, Reference2BooleanMap<Block> oreTracker) {
         IModule<ModuleVeinMiningUnit> veinMiningUnit = getModule(stack, MekanismModules.VEIN_MINING_UNIT);
         if (veinMiningUnit != null && veinMiningUnit.isEnabled()) {
             ModuleVeinMiningUnit customInstance = veinMiningUnit.getCustomInstance();
@@ -231,33 +328,20 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
         if (player.world.isRemote || player.isCreative()) {
             return super.onBlockStartBreak(itemstack, pos, player);
         }
-        IEnergizedItem energyContainer = this;
+        IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(itemstack, 0);
         if (energyContainer != null) {
             World world = player.world;
             IBlockState state = world.getBlockState(pos);
             boolean silk = isModuleEnabled(itemstack, MekanismModules.SILK_TOUCH_UNIT);
             double modDestroyEnergy = getDestroyEnergy(itemstack, silk);
             double energyRequired = getDestroyEnergy(modDestroyEnergy, state.getBlockHardness(world, pos));
-            if (energyContainer.extract(itemstack, energyRequired, false) >= (energyRequired)) {
-                Map<BlockPos, IBlockState> blocks = getBlastedBlocks(world, player, itemstack, pos, state);
-                Map<BlockPos, IBlockState> map = new HashMap<>();
-                map.put(pos, state);
-                blocks = blocks.isEmpty() && ModuleVeinMiningUnit.canVeinBlock(state) ? map : blocks;
-                Block block = state.getBlock();
-                if (block == Blocks.LIT_REDSTONE_ORE) {
-                    block = Blocks.REDSTONE_ORE;
-                }
-                RayTraceResult raytrace = doRayTrace(state, pos, player);
-                ItemStack stack = block.getPickBlock(state, raytrace, player.world, pos, player);
-                List<String> names = OreDictCache.getOreDictName(stack);
-                boolean isOre = names.stream().anyMatch(s -> s.startsWith("ore") || s.equals("logWood"));
-                Reference2BooleanMap<Block> oreTracker = blocks.values().stream().collect(Collectors.toMap(IBlockState::getBlock, bs -> isOre, (l, r) -> l, Reference2BooleanArrayMap::new));
-                Object2IntMap<BlockPos> veinedBlocks = getVeinedBlocks(world, itemstack, blocks, oreTracker);
-                if (!veinedBlocks.isEmpty()) {
+            if (energyContainer.extract(energyRequired, Action.SIMULATE, AutomationType.MANUAL) >= energyRequired) {
+                VeinMiningTargets targets = getVeinMiningTargets(world, player, itemstack, pos, state);
+                if (targets != null && !targets.getVeinedBlocks().isEmpty()) {
                     double baseDestroyEnergy = getDestroyEnergy(silk);
-                    MekanismUtils.veinMineArea(energyContainer, energyRequired, world, pos, (EntityPlayerMP) player, itemstack, this, veinedBlocks,
+                    MekanismUtils.veinMineArea(energyContainer, energyRequired, world, pos, (EntityPlayerMP) player, itemstack, this, targets.getVeinedBlocks(),
                             hardness -> getDestroyEnergy(modDestroyEnergy, hardness),
-                            (hardness, distance, bs) -> getDestroyEnergy(baseDestroyEnergy, hardness) * (0.5 * Math.pow(distance, oreTracker.getBoolean(isOre) ? 1.5 : 2)));
+                            (hardness, distance, bs) -> getDestroyEnergy(baseDestroyEnergy, hardness) * (0.5 * Math.pow(distance, targets.getOreTracker().getBoolean(targets.isOre()) ? 1.5 : 2)));
 
                 }
             }
@@ -266,7 +350,7 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
     }
 
 
-    private RayTraceResult doRayTrace(IBlockState state, BlockPos pos, EntityPlayer player) {
+    public RayTraceResult doRayTrace(IBlockState state, BlockPos pos, EntityPlayer player) {
         Vec3d positionEyes = player.getPositionEyes(1.0F);
         Vec3d playerLook = player.getLook(1.0F);
         double blockReachDistance = player.getAttributeMap().getAttributeInstance(EntityPlayer.REACH_DISTANCE).getAttributeValue();
@@ -276,20 +360,20 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
         return res != null ? res : new RayTraceResult(RayTraceResult.Type.MISS, Vec3d.ZERO, EnumFacing.UP, pos);
     }
 
-    private double getDestroyEnergy(boolean silk) {
+    public double getDestroyEnergy(boolean silk) {
         return silk ? MekanismConfig.current().meka.mekaToolEnergyUsageSilk.val() : MekanismConfig.current().meka.mekaToolEnergyUsage.val();
     }
 
-    private double getDestroyEnergy(ItemStack itemStack, float hardness, boolean silk) {
+    public double getDestroyEnergy(ItemStack itemStack, float hardness, boolean silk) {
         return getDestroyEnergy(getDestroyEnergy(itemStack, silk), hardness);
     }
 
-    private double getDestroyEnergy(double baseDestroyEnergy, float hardness) {
+    public double getDestroyEnergy(double baseDestroyEnergy, float hardness) {
         return hardness == 0 ? baseDestroyEnergy / (2) : baseDestroyEnergy;
     }
 
 
-    private double getDestroyEnergy(ItemStack itemStack, boolean silk) {
+    public double getDestroyEnergy(ItemStack itemStack, boolean silk) {
         double destroyEnergy = getDestroyEnergy(silk);
         IModule<ModuleExcavationEscalationUnit> module = getModule(itemStack, MekanismModules.EXCAVATION_ESCALATION_UNIT);
         float efficiency = module == null || !module.isEnabled() ? MekanismConfig.current().meka.mekaToolBaseEfficiency.val() : module.getCustomInstance().getEfficiency();
@@ -308,8 +392,8 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
             int unitDamage = attackAmplificationUnit.getCustomInstance().getDamage();
             if (unitDamage > 0) {
                 double energyCost = MekanismConfig.current().meka.mekaToolEnergyUsageWeapon.val() * (unitDamage / 4D);
-                IEnergizedItem energyContainer = this;
-                double energy = energyContainer == null ? 0L : energyContainer.getEnergy(stack);
+                IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
+                double energy = energyContainer == null ? 0L : energyContainer.getEnergy();
                 if (energy < energyCost) {
                     //If we don't have enough power use it at a reduced power level (this will be false the majority of the time)
                     damage += unitDamage * MathUtils.divideToLevel(energy, energyCost);
@@ -343,12 +427,12 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
                         if (distance < 5) {
                             return new ActionResult<>(EnumActionResult.PASS, stack);
                         }
-                        IEnergizedItem energyContainer = this;
+                        IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
                         double energyNeeded = MekanismConfig.current().meka.mekaToolEnergyUsageTeleport.val() * (distance / 10D);
-                        if (energyContainer == null || energyContainer.getEnergy(stack) < (energyNeeded)) {
+                        if (energyContainer == null || energyContainer.getEnergy() < energyNeeded) {
                             return new ActionResult<>(EnumActionResult.FAIL, stack);
                         }
-                        energyContainer.extract(stack, energyNeeded, true);
+                        energyContainer.extract(energyNeeded, Action.EXECUTE, AutomationType.MANUAL);
                         if (player.isRiding()) {
                             player.dismountRidingEntity();
                         }
@@ -407,14 +491,14 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
     }
 
     @Override
-    public double getMaxEnergy(ItemStack stack) {
+    public double getEnergyCapacity(ItemStack stack) {
         IModule<ModuleEnergyUnit> module = getModule(stack, MekanismModules.ENERGY_UNIT);
         return module == null ? MekanismConfig.current().meka.mekaToolBaseEnergyCapacity.val() : module.getCustomInstance().getEnergyCapacity(module);
     }
 
 
     @Override
-    public double getMaxTransfer(ItemStack stack) {
+    public double getEnergyTransfer(ItemStack stack) {
         IModule<ModuleEnergyUnit> module = getModule(stack, MekanismModules.ENERGY_UNIT);
         return module == null ? MekanismConfig.current().meka.mekaToolBaseChargeRate.val() : module.getCustomInstance().getChargeRate(module);
     }
@@ -475,4 +559,12 @@ public class ItemMekaTool extends ItemEnergized implements IModuleContainerItem,
             }
         }
     }
+
+
+    @Override
+    public void onUpdate(ItemStack stack, World world, Entity entity, int itemSlot, boolean isSelected) {
+        super.onUpdate(stack, world, entity, itemSlot, isSelected);
+        getModules(stack).forEach(module -> module.onUpdateModule(stack, world, entity, itemSlot, isSelected));
+    }
+
 }

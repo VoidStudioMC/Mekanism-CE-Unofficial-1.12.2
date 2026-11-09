@@ -4,11 +4,11 @@ import mekanism.api.Coord4D;
 import mekanism.api.EnumColor;
 import mekanism.common.base.ILogisticalTransporter;
 import mekanism.common.capabilities.Capabilities;
-import mekanism.common.content.transporter.TransitRequest;
-import mekanism.common.content.transporter.TransitRequest.TransitResponse;
 import mekanism.common.content.transporter.TransporterManager;
 import mekanism.common.content.transporter.TransporterStack;
-import mekanism.common.tile.TileEntityLogisticalSorter;
+import mekanism.common.lib.inventory.IAdvancedTransportEjector;
+import mekanism.common.lib.inventory.TransitRequest;
+import mekanism.common.lib.inventory.TransitRequest.TransitResponse;
 import net.minecraft.block.Block;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumFacing;
@@ -33,8 +33,9 @@ public final class TransporterUtils {
         return transporter.insert(Coord4D.get(outputter), request, color, doEmit, min);
     }
 
-    public static TransitResponse insertRR(TileEntityLogisticalSorter outputter, ILogisticalTransporter transporter, TransitRequest request, EnumColor color, boolean doEmit, int min) {
-        return transporter.insertRR(outputter, request, color, doEmit, min);
+    public static TransitResponse insertMaybeRR(IAdvancedTransportEjector outputter, TileEntity outputterTile, ILogisticalTransporter transporter, TransitRequest request,
+                                                EnumColor color, boolean doEmit, int min) {
+        return transporter.insertMaybeRR(outputter, Coord4D.get(outputterTile), request, color, doEmit, min);
     }
 
     public static EnumColor increment(EnumColor color) {
@@ -64,13 +65,21 @@ public final class TransporterUtils {
         }
         TransporterManager.remove(stack);
         BlockPos blockPos = new BlockPos(tileEntity.coord().x + pos[0], tileEntity.coord().y + pos[1], tileEntity.coord().z + pos[2]);
-        InventoryUtils.dropStack(stack.itemStack,itemStack -> Block.spawnAsEntity(tileEntity.world(), blockPos,itemStack));
+        InventoryUtils.dropStack(stack.itemStack, itemStack -> Block.spawnAsEntity(tileEntity.world(), blockPos, itemStack));
     }
 
     public static float[] getStackPosition(ILogisticalTransporter tileEntity, TransporterStack stack, float partial) {
+        float[] position = new float[3];
+        getStackPosition(tileEntity, stack, partial, position);
+        return position;
+    }
+
+    public static void getStackPosition(ILogisticalTransporter tileEntity, TransporterStack stack, float partial, float[] position) {
         EnumFacing side = stack.getSide(tileEntity);
         float progress = (((float) stack.progress + partial) / 100F) - 0.5F;
-        return new float[]{0.5F + side.getXOffset() * progress, 0.25F + side.getYOffset() * progress, 0.5F + side.getZOffset() * progress};
+        position[0] = 0.5F + side.getXOffset() * progress;
+        position[1] = 0.25F + side.getYOffset() * progress;
+        position[2] = 0.5F + side.getZOffset() * progress;
     }
 
     public static void incrementColor(ILogisticalTransporter tileEntity) {

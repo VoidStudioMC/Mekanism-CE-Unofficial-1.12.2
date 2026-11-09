@@ -33,12 +33,16 @@ public class RenderMechanicalPipe extends RenderTransmitterBase<TileEntityMechan
     private static Int2ObjectMap<FluidRenderMap<DisplayInteger[]>> cachedLiquids = new Int2ObjectArrayMap<>(7);
 
     public static void onStitch() {
+        cachedLiquids.values().forEach(fluids -> fluids.values().forEach(DisplayInteger::deleteAll));
         cachedLiquids.clear();
     }
 
     @Override
     public void render(TileEntityMechanicalPipe pipe, double x, double y, double z, float partialTick, int destroyStage, float alpha) {
         if (MekanismConfig.current().client.opaqueTransmitters.val()) {
+            return;
+        }
+        if (!shouldRenderTransmitterInterior(pipe, partialTick)) {
             return;
         }
 
@@ -108,6 +112,7 @@ public class RenderMechanicalPipe extends RenderTransmitterBase<TileEntityMechan
             GlStateManager.enableAlpha();
             GlStateManager.enableLighting();
             GlStateManager.disableCull();
+            GlStateManager.shadeModel(GL11.GL_FLAT);
         }
     }
 

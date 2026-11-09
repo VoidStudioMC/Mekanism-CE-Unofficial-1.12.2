@@ -1,31 +1,30 @@
 package mekanism.common;
 
 import mekanism.api.Coord4D;
+import mekanism.api.EnumColor;
 import mekanism.api.MekanismAPI;
 import mekanism.api.Pos3D;
 import mekanism.client.SparkleAnimation.INodeChecker;
 import mekanism.common.base.IGuiProvider;
-import mekanism.common.base.IUpgradeTile;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.entity.EntityRobit;
-import mekanism.common.inventory.InventoryPersonalChest;
-import mekanism.common.inventory.ModuleTweakerContainer;
 import mekanism.common.inventory.container.*;
+import mekanism.common.inventory.container.item.*;
 import mekanism.common.inventory.container.robit.*;
 import mekanism.common.item.ItemDictionary;
+import mekanism.common.item.ItemPortableQIODashboard;
 import mekanism.common.item.ItemPortableTeleporter;
 import mekanism.common.item.ItemSeismicReader;
-import mekanism.common.network.PacketPortableTeleporter.PortableTeleporterMessage;
+import mekanism.common.security.ISecurityItem;
 import mekanism.common.tile.*;
 import mekanism.common.tile.factory.TileEntityFactory;
 import mekanism.common.tile.laser.TileEntityLaserAmplifier;
 import mekanism.common.tile.laser.TileEntityLaserTractorBeam;
 import mekanism.common.tile.machine.*;
-import mekanism.common.tile.multiblock.TileEntityDynamicTank;
-import mekanism.common.tile.multiblock.TileEntityInductionCasing;
-import mekanism.common.tile.multiblock.TileEntityThermalEvaporationController;
+import mekanism.common.tile.multiblock.*;
 import mekanism.common.tile.prefab.*;
+import mekanism.common.tile.qio.*;
 import mekanism.common.voice.VoiceServerManager;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
@@ -38,6 +37,7 @@ import net.minecraft.util.EnumFacing;
 import net.minecraft.util.EnumHand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.RayTraceResult;
+import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
 import net.minecraft.world.WorldServer;
 import net.minecraftforge.common.MinecraftForge;
@@ -64,9 +64,6 @@ public class CommonProxy implements IGuiProvider {
     public void registerTESRs() {
     }
 
-    public void handleTeleporterUpdate(PortableTeleporterMessage message) {
-    }
-
     /**
      * Register and load client-only item render information.
      */
@@ -77,6 +74,12 @@ public class CommonProxy implements IGuiProvider {
      * Register and load client-only block render information.
      */
     public void registerBlockRenders() {
+    }
+
+    /**
+     * Client hook used to refresh recipe-viewer transfer availability.
+     */
+    public void onQIOViewerResourcesChanged() {
     }
 
     /**
@@ -137,37 +140,52 @@ public class CommonProxy implements IGuiProvider {
     }
 
     private Container getServerItemGui(EntityPlayer player, BlockPos pos) {
-        int currentItem = pos.getX();
+        int itemSlot = pos.getX();
         int handOrdinal = pos.getY();
-        if (currentItem < 0 || currentItem >= player.inventory.mainInventory.size() || handOrdinal < 0 || handOrdinal >= EnumHand.values().length) {
+        if (handOrdinal < 0 || handOrdinal >= EnumHand.values().length) {
             //If it is out of bounds don't do anything
             return null;
         }
-        ItemStack stack = player.inventory.getStackInSlot(currentItem);
+        EnumHand hand = EnumHand.values()[handOrdinal];
+        if (!ItemStackSlotAccess.isValidSlot(hand, itemSlot)) {
+            return null;
+        }
+        ItemStack stack = ItemStackSlotAccess.getStack(player.inventory, hand, itemSlot);
         if (stack.isEmpty()) {
             return null;
         }
-        EnumHand hand = EnumHand.values()[handOrdinal];
         int guiID = pos.getZ();
         switch (guiID) {
             case 0:
                 if (stack.getItem() instanceof ItemDictionary) {
-                    return new ContainerDictionary(player.inventory);
+                    return new DictionaryContainer(player.inventory, hand, itemSlot, stack);
                 }
                 break;
             case 14:
                 if (stack.getItem() instanceof ItemPortableTeleporter) {
-                    return new ContainerNull();
+                    return new PortableTeleporterContainer(player.inventory, hand, itemSlot, stack);
                 }
+                break;
+            case QIOGuiConstants.PORTABLE_DASHBOARD:
+                if (stack.getItem() instanceof ItemPortableQIODashboard) {
+                    return new PortableQIODashboardContainer(player.inventory, hand, itemSlot, stack);
+                }
+                break;
+            case QIOGuiConstants.PORTABLE_FREQUENCY:
+                if (stack.getItem() instanceof ItemPortableQIODashboard) {
+                    return new QIOItemFrequencySelectContainer(player.inventory, hand, itemSlot, stack);
+                }
+                break;
             case 19:
-                if (MachineType.get(stack) == MachineType.PERSONAL_CHEST) {
+                if (MachineType.get(stack) == MachineType.PERSONAL_CHEST && stack.getCount() == 1
+                        && stack.getItem() instanceof ISecurityItem securityItem && securityItem.getOwnerUUID(stack) != null) {
                     //Ensure the item didn't change. From testing even if it did things still seemed to work properly but better safe than sorry
-                    return new ContainerPersonalChest(player.inventory, new InventoryPersonalChest(stack, hand));
+                    return new PersonalStorageItemContainer(player.inventory, hand, itemSlot, stack);
                 }
                 break;
             case 38:
                 if (stack.getItem() instanceof ItemSeismicReader) {
-                    return new ContainerNull();
+                    return new SeismicReaderContainer(player.inventory, hand, itemSlot, stack);
                 }
                 break;
         }
@@ -213,6 +231,9 @@ public class CommonProxy implements IGuiProvider {
             return getServerEntityGui(player, world, pos);
         }
         TileEntity tileEntity = world.getTileEntity(pos);
+        if (ID != 77 && !canOpenServerGui(player, tileEntity)) {
+            return null;
+        }
         return switch (ID) {
             //0, 1 USED BEFORE SWITCH
             case 2 -> new ContainerDigitalMiner(player.inventory, (TileEntityDigitalMiner) tileEntity);
@@ -225,7 +246,8 @@ public class CommonProxy implements IGuiProvider {
             case 7 ->
                     new ContainerRotaryCondensentrator(player.inventory, (TileEntityRotaryCondensentrator) tileEntity);
             case 8 -> new ContainerEnergyCube(player.inventory, (TileEntityEnergyCube) tileEntity);
-            case 9, 50, 51, 55, 59 -> new ContainerNull(player, (TileEntityContainerBlock) tileEntity);
+            case 50, 55 -> new ContainerNull(player, (TileEntityContainerBlock) tileEntity);
+            case 59 -> new ContainerFilterHolder(player.inventory, (TileEntityContainerBlock) tileEntity);
             case 10 -> new ContainerGasTank(player.inventory, (TileEntityGasTank) tileEntity);
             case 11 -> new ContainerFactory(player.inventory, (TileEntityFactory) tileEntity);
             case 12 -> new ContainerMetallurgicInfuser(player.inventory, (TileEntityMetallurgicInfuser) tileEntity);
@@ -255,7 +277,6 @@ public class CommonProxy implements IGuiProvider {
             case 40 -> new ContainerPRC(player.inventory, (TileEntityPRC) tileEntity);
             case 41 -> new ContainerFluidTank(player.inventory, (TileEntityFluidTank) tileEntity);
             case 42 -> new ContainerFluidicPlenisher(player.inventory, (TileEntityFluidicPlenisher) tileEntity);
-            case 43 -> new ContainerUpgradeManagement(player.inventory, (IUpgradeTile) tileEntity);
             case 44 -> new ContainerLaserAmplifier(player.inventory, (TileEntityLaserAmplifier) tileEntity);
             case 45 -> new ContainerLaserTractorBeam(player.inventory, (TileEntityLaserTractorBeam) tileEntity);
             case 46 ->
@@ -288,15 +309,110 @@ public class CommonProxy implements IGuiProvider {
             case 75 -> new ContainerModificationStation(player.inventory, (TileEntityModificationStation) tileEntity);
             case 76 -> new ContainerSPS(player.inventory, (TileEntityContainerBlock) tileEntity);
             case 77 -> new ModuleTweakerContainer(player.inventory);
+            case 78 -> new ContainerSPSMultiblock(player.inventory, (TileEntityContainerBlock) tileEntity);
+            case 79 ->
+                    new ContainerDimensionalStabilizer(player.inventory, (TileEntityDimensionalStabilizer) tileEntity);
+            case QIOGuiConstants.DRIVE_ARRAY ->
+                    new ContainerQIODriveArray(player.inventory, (TileEntityQIODriveArray) tileEntity);
+            case QIOGuiConstants.DRIVE_ARRAY_FREQUENCY ->
+                    new ContainerQIOFrequencySelect(player.inventory, (TileEntityQIODriveArray) tileEntity);
+            case QIOGuiConstants.DASHBOARD ->
+                    new ContainerQIODashboard(player.inventory, (TileEntityQIODashboard) tileEntity);
+            case QIOGuiConstants.IMPORTER ->
+                    new ContainerQIOImporter(player.inventory, (TileEntityQIOImporter) tileEntity);
+            case QIOGuiConstants.EXPORTER ->
+                    new ContainerQIOExporter(player.inventory, (TileEntityQIOExporter) tileEntity);
+            case QIOGuiConstants.REDSTONE_ADAPTER ->
+                    new ContainerQIORedstoneAdapter(player.inventory, (TileEntityQIORedstoneAdapter) tileEntity);
+            case QIOGuiConstants.COMPONENT_FREQUENCY ->
+                    new ContainerQIOFrequencySelect(player.inventory, (TileEntityQIOComponent) tileEntity);
             default -> null;
         };
+    }
+
+    @Override
+    public boolean isValidServerGui(int ID, TileEntity tile) {
+        return switch (ID) {
+            case 2 -> tile instanceof TileEntityDigitalMiner;
+            case 3, 6, 16, 64, 65, 66, 67 -> tile instanceof TileEntityElectricMachine;
+            case 4, 15, 31 -> tile instanceof TileEntityAdvancedElectricMachine;
+            case 5, 68 -> tile instanceof TileEntityDoubleElectricMachine;
+            case 7 -> tile instanceof TileEntityRotaryCondensentrator;
+            case 8 -> tile instanceof TileEntityEnergyCube;
+            case 10 -> tile instanceof TileEntityGasTank;
+            case 11 -> tile instanceof TileEntityFactory;
+            case 12 -> tile instanceof TileEntityMetallurgicInfuser;
+            case 13 -> tile instanceof TileEntityTeleporter;
+            case 17 -> tile instanceof TileEntityElectricPump;
+            case 18 -> tile instanceof TileEntityDynamicTank;
+            case 19 -> tile instanceof TileEntityPersonalChest;
+            case 26, 27, 28 -> tile instanceof TileEntityContainerBlock;
+            case 29 -> tile instanceof TileEntityChemicalOxidizer;
+            case 30 -> tile instanceof TileEntityChemicalInfuser;
+            case 32 -> tile instanceof TileEntityElectrolyticSeparator;
+            case 33 -> tile instanceof TileEntityThermalEvaporationController;
+            case 34 -> tile instanceof TileEntityPrecisionSawmill;
+            case 35 -> tile instanceof TileEntityChemicalDissolutionChamber;
+            case 36 -> tile instanceof TileEntityChemicalWasher;
+            case 37 -> tile instanceof TileEntityChemicalCrystallizer;
+            case 39 -> tile instanceof TileEntitySeismicVibrator;
+            case 40 -> tile instanceof TileEntityPRC;
+            case 41 -> tile instanceof TileEntityFluidTank;
+            case 42 -> tile instanceof TileEntityFluidicPlenisher;
+            case 44 -> tile instanceof TileEntityLaserAmplifier;
+            case 45 -> tile instanceof TileEntityLaserTractorBeam;
+            case 46 -> tile instanceof TileEntityQuantumEntangloporter;
+            case 47 -> tile instanceof TileEntitySolarNeutronActivator;
+            case 48 -> tile instanceof TileEntityAmbientAccumulator;
+            case 49, 50 -> tile instanceof TileEntityInductionCasing;
+            case 52 -> tile instanceof TileEntityOredictionificator;
+            case 53 -> tile instanceof TileEntityResistiveHeater;
+            case 54, 55 -> tile instanceof TileEntityBoilerCasing;
+            case 56 -> tile instanceof TileEntityFormulaicAssemblicator;
+            case 57 -> tile instanceof TileEntitySecurityDesk;
+            case 58 -> tile instanceof TileEntityFuelwoodHeater;
+            case 59 -> tile instanceof TileEntityLogisticalSorter;
+            case 60 -> tile instanceof TileEntityIsotopicCentrifuge;
+            case 61 -> tile instanceof TileEntityNutritionalLiquifier;
+            case 62 -> tile instanceof TileEntityOrganicFarm;
+            case 63 -> tile instanceof TileEntityAntiprotonicNucleosynthesizer;
+            case 70 -> tile instanceof TileEntityCellExtractor;
+            case 71 -> tile instanceof TileEntityCellSeparator;
+            case 72 -> tile instanceof TileEntityRecycler;
+            case 73 -> tile instanceof TileEntityAmbientAccumulatorEnergy;
+            case 74 -> tile instanceof TileEntityHybridStorage;
+            case 75 -> tile instanceof TileEntityModificationStation;
+            case 76 -> tile instanceof TileEntitySPS;
+            // Module Tweaker is opened through the separately restricted PacketOpenGui path.
+            case 77 -> false;
+            case 78 -> tile instanceof TileEntitySPSCasing;
+            case 79 -> tile instanceof TileEntityDimensionalStabilizer;
+            case QIOGuiConstants.DRIVE_ARRAY, QIOGuiConstants.DRIVE_ARRAY_FREQUENCY ->
+                    tile instanceof TileEntityQIODriveArray;
+            case QIOGuiConstants.DASHBOARD -> tile instanceof TileEntityQIODashboard;
+            case QIOGuiConstants.IMPORTER -> tile instanceof TileEntityQIOImporter;
+            case QIOGuiConstants.EXPORTER -> tile instanceof TileEntityQIOExporter;
+            case QIOGuiConstants.REDSTONE_ADAPTER -> tile instanceof TileEntityQIORedstoneAdapter;
+            case QIOGuiConstants.COMPONENT_FREQUENCY -> tile instanceof TileEntityQIOComponent;
+            default -> false;
+        };
+    }
+
+    public static boolean canOpenServerGui(EntityPlayer player, TileEntity tileEntity) {
+        if (tileEntity instanceof TileEntityBasicBlock basicBlock && !basicBlock.canPlayerOpenGui(player)) {
+            player.sendMessage(new TextComponentString(EnumColor.DARK_BLUE + Mekanism.LOG_TAG + " " + EnumColor.RED +
+                    "This machine GUI is already open by another player."));
+            return false;
+        }
+        return true;
     }
 
     public void preInit() {
 
     }
 
-    protected void postInit() {}
+    protected void postInit() {
+    }
 
     public double getReach(EntityPlayer player) {
         if (player instanceof EntityPlayerMP) {

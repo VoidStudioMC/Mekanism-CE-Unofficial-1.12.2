@@ -44,10 +44,15 @@ public class RenderLogisticalTransporter extends RenderTransmitterBase<TileEntit
     private static TextureAtlasSprite torchOffIcon;
     private static TextureAtlasSprite torchOnIcon;
     private ModelTransporterBox modelBox = new ModelTransporterBox();
-    private EntityItem entityItem = new EntityItem(null);
+    private EntityItem entityItem;
     private Render<EntityItem> renderer = Minecraft.getMinecraft().getRenderManager().getEntityClassRenderObject(EntityItem.class);
+    private final Collection<TransporterStack> reducedTransitBuffer = new ArrayList<>();
+    private final Set<TransportInformation> transitInformationBuffer = new ObjectOpenHashSet<>();
+    private final float[] stackPositionBuffer = new float[3];
+    private boolean renderBuffersInUse;
 
     public static void onStitch(TextureMap map) {
+        cachedOverlays.values().forEach(overlays -> overlays.values().forEach(DisplayInteger::delete));
         cachedOverlays.clear();
 
         gunpowderIcon = map.getTextureExtry("minecraft:items/gunpowder");
@@ -60,47 +65,83 @@ public class RenderLogisticalTransporter extends RenderTransmitterBase<TileEntit
         if (MekanismConfig.current().client.opaqueTransmitters.val()) {
             return;
         }
+        if (!shouldRenderTransmitterInterior(transporter, partialTick)) {
+            return;
+        }
         //Keep track of if we had to push. Makes it so that we don't have to push and pop if we end up doing no rendering
         boolean pushed = false;
         Collection<TransporterStack> inTransit = transporter.getTransmitter().getTransit();
         if (!inTransit.isEmpty()) {
+            if (!transporter.hasWorld()) {
+                return;
+            }
+            boolean useSharedBuffers = !renderBuffersInUse;
+            Collection<TransporterStack> reducedTransit;
+            Set<TransportInformation> transitInformation;
+            float[] stackPosition;
+            EntityItem renderedItem;
+            if (useSharedBuffers) {
+                renderBuffersInUse = true;
+                reducedTransitBuffer.clear();
+                transitInformationBuffer.clear();
+                reducedTransit = reducedTransitBuffer;
+                transitInformation = transitInformationBuffer;
+                stackPosition = stackPositionBuffer;
+                if (entityItem == null || entityItem.world != transporter.getWorld()) {
+                    entityItem = new EntityItem(transporter.getWorld());
+                }
+                renderedItem = entityItem;
+            } else {
+                reducedTransit = new ArrayList<>();
+                transitInformation = new ObjectOpenHashSet<>();
+                stackPosition = new float[3];
+                renderedItem = new EntityItem(transporter.getWorld());
+            }
             GlStateManager.pushMatrix();
             pushed = true;
 
-            entityItem.setNoDespawn();
-            entityItem.hoverStart = 0;
-            entityItem.setPosition(transporter.getPos().getX() + 0.5, transporter.getPos().getY() + 0.5, transporter.getPos().getZ() + 0.5);
-            entityItem.world = transporter.getWorld();
+            try {
+                renderedItem.setNoDespawn();
+                renderedItem.hoverStart = 0;
+                renderedItem.setPosition(transporter.getPos().getX() + 0.5, transporter.getPos().getY() + 0.5, transporter.getPos().getZ() + 0.5);
+                renderedItem.world = transporter.getWorld();
 
-            float partial = partialTick * transporter.tier.getSpeed();
-            Collection<TransporterStack> reducedTransit = getReducedTransit(inTransit);
-            reducedTransit.forEach(stack -> {
-                entityItem.setItem(stack.itemStack);
-                float[] pos = TransporterUtils.getStackPosition(transporter.getTransmitter(), stack, partial);
-                float xShifted = (float) x + pos[0];
-                float yShifted = (float) y + pos[1];
-                float zShifted = (float) z + pos[2];
+                float partial = partialTick * transporter.getTransmitter().getSpeed();
+                reduceTransit(inTransit, reducedTransit, transitInformation);
+                for (TransporterStack stack : reducedTransit) {
+                    renderedItem.setItem(stack.itemStack);
+                    TransporterUtils.getStackPosition(transporter.getTransmitter(), stack, partial, stackPosition);
+                    float xShifted = (float) x + stackPosition[0];
+                    float yShifted = (float) y + stackPosition[1];
+                    float zShifted = (float) z + stackPosition[2];
 
-                GlStateManager.pushMatrix();
-                GlStateManager.translate(xShifted, yShifted, zShifted);
-                GlStateManager.scale(0.75F, 0.75F, 0.75F);
-                renderer.doRender(entityItem, 0, 0, 0, 0, 0);
-                GlStateManager.popMatrix();
-
-                if (stack.color != null) {
-                    bindTexture(transporterBox);
                     GlStateManager.pushMatrix();
-                    GlowInfo glowInfo = MekanismRenderer.enableGlow();
-                    GlStateManager.disableCull();
-                    MekanismRenderer.color(stack.color);
                     GlStateManager.translate(xShifted, yShifted, zShifted);
-                    modelBox.render(0.0625F);
-                    MekanismRenderer.resetColor();
-                    GlStateManager.enableCull();
-                    MekanismRenderer.disableGlow(glowInfo);
+                    GlStateManager.scale(0.75F, 0.75F, 0.75F);
+                    renderer.doRender(renderedItem, 0, 0, 0, 0, 0);
                     GlStateManager.popMatrix();
+
+                    if (stack.color != null) {
+                        bindTexture(transporterBox);
+                        GlStateManager.pushMatrix();
+                        GlowInfo glowInfo = MekanismRenderer.enableGlow();
+                        GlStateManager.disableCull();
+                        MekanismRenderer.color(stack.color);
+                        GlStateManager.translate(xShifted, yShifted, zShifted);
+                        modelBox.render(0.0625F);
+                        MekanismRenderer.resetColor();
+                        GlStateManager.enableCull();
+                        MekanismRenderer.disableGlow(glowInfo);
+                        GlStateManager.popMatrix();
+                    }
                 }
-            });
+            } finally {
+                if (useSharedBuffers) {
+                    reducedTransitBuffer.clear();
+                    transitInformationBuffer.clear();
+                    renderBuffersInUse = false;
+                }
+            }
         }
 
         if (transporter instanceof TileEntityDiversionTransporter transporter1) {
@@ -136,6 +177,7 @@ public class RenderLogisticalTransporter extends RenderTransmitterBase<TileEntit
                     MekanismRenderer.disableGlow(glowInfo);
                     GlStateManager.enableLighting();
                     GlStateManager.disableCull();
+                    GlStateManager.shadeModel(GL11.GL_FLAT);
                     GlStateManager.popMatrix();
                 }
             }
@@ -149,17 +191,15 @@ public class RenderLogisticalTransporter extends RenderTransmitterBase<TileEntit
     /**
      * Shrink the in transit list as much as possible. Don't try to render things of the same type that are in the same spot with the same color, ignoring stack size
      */
-    private Collection<TransporterStack> getReducedTransit(Collection<TransporterStack> inTransit) {
-        Collection<TransporterStack> reducedTransit = new ArrayList<>();
-        Set<TransportInformation> information = new ObjectOpenHashSet<>();
-        inTransit.forEach(stack -> {
+    private void reduceTransit(Collection<TransporterStack> inTransit, Collection<TransporterStack> reducedTransit,
+                               Set<TransportInformation> information) {
+        for (TransporterStack stack : inTransit) {
             if (stack != null && !stack.itemStack.isEmpty() && information.add(new TransportInformation(stack))) {
                 //Ensure the stack is valid AND we did not already have information matching the stack
                 //We use add to check if it already contained the value, so that we only have to query the set once
                 reducedTransit.add(stack);
             }
-        });
-        return reducedTransit;
+        }
     }
 
     private DisplayInteger getOverlayDisplay(EnumFacing side, int mode) {

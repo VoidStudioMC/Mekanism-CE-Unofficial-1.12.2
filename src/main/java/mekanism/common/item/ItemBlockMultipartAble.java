@@ -53,7 +53,7 @@ public abstract class ItemBlockMultipartAble extends ItemBlock {
             pos = pos.offset(facing);
         }
 
-        if (player.canPlayerEdit(pos, facing, itemstack) && mayPlace(itemstack, worldIn, pos, iblockstate, hand, facing,player)) {
+        if (player.canPlayerEdit(pos, facing, itemstack) && mayPlace(itemstack, worldIn, pos, iblockstate, hand, facing, player)) {
             int i = this.getMetadata(itemstack.getMetadata());
             IBlockState iblockstate1 = this.block.getStateForPlacement(worldIn, pos, facing, hitX, hitY, hitZ, i, player, hand);
             boolean flag;
@@ -73,7 +73,7 @@ public abstract class ItemBlockMultipartAble extends ItemBlock {
         return EnumActionResult.FAIL;
     }
 
-    private boolean mayPlace(ItemStack itemstack, World worldIn, BlockPos pos, IBlockState state, EnumHand hand, EnumFacing facing,EntityPlayer player) {
+    private boolean mayPlace(ItemStack itemstack, World worldIn, BlockPos pos, IBlockState state, EnumHand hand, EnumFacing facing, EntityPlayer player) {
         if (!Mekanism.hooks.MCMPLoaded) {
             return worldIn.mayPlace(this.block, pos, false, facing, player);
         }
@@ -85,14 +85,17 @@ public abstract class ItemBlockMultipartAble extends ItemBlock {
         if (!Mekanism.hooks.MCMPLoaded || !(container = MultipartHelper.getContainer(worldIn, pos)).isPresent()) {
             return false;
         }
-        IMultipart multipart = getMultiPart();
+        Object multiPart = getMultiPart();
+        if (!(multiPart instanceof IMultipart multipart)) {
+            return false;
+        }
         IPartSlot slot = multipart.getSlotForPlacement(worldIn, pos, state, facing, 0, 0, 0, null);
         return container.get().canAddPart(slot, this.block.getStateForPlacement(worldIn, pos, facing, 0, 0, 0, itemstack.getMetadata(), null, EnumHand.MAIN_HAND));
     }
 
     //FQ needed because it uses java optional interface elsewhere
     @net.minecraftforge.fml.common.Optional.Method(modid = MekanismHooks.MCMULTIPART_MOD_ID)
-    protected abstract IMultipart getMultiPart();
+    protected abstract Object getMultiPart();
 
     @Override
     public boolean canPlaceBlockOnSide(World worldIn, @Nonnull BlockPos pos, @Nonnull EnumFacing side, @Nonnull EntityPlayer player, ItemStack stack) {

@@ -1,11 +1,11 @@
 package mekanism.common.content.gear.mekasuit;
 
 import baubles.api.BaublesApi;
-import cofh.redstoneflux.api.IEnergyContainerItem;
-import ic2.api.item.ElectricItem;
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.annotations.ParametersAreNotNullByDefault;
-import mekanism.api.energy.EnergizedItemManager;
-import mekanism.api.energy.IEnergizedItem;
+import mekanism.api.energy.IEnergyContainer;
+import mekanism.api.energy.IStrictEnergyHandler;
 import mekanism.api.gear.ICustomModule;
 import mekanism.api.gear.IModule;
 import mekanism.api.gear.config.IModuleConfigItem;
@@ -13,27 +13,19 @@ import mekanism.api.gear.config.ModuleBooleanData;
 import mekanism.api.gear.config.ModuleConfigItemCreator;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismLang;
-import mekanism.common.capabilities.Capabilities;
+import mekanism.common.config.MekanismConfig;
 import mekanism.common.content.network.distribution.EnergySaveTarget;
 import mekanism.common.integration.MekanismHooks;
-import mekanism.common.integration.forgeenergy.ForgeEnergyIntegration;
-import mekanism.common.integration.ic2.IC2Integration;
-import mekanism.common.integration.redstoneflux.RFIntegration;
-import mekanism.common.integration.tesla.TeslaIntegration;
-import mekanism.common.util.EmitUtils2;
-import mekanism.common.util.MekanismUtils;
-import net.darkhax.tesla.api.ITeslaConsumer;
+import mekanism.common.integration.energy.EnergyCompatUtils;
+import mekanism.common.util.EmitUtils;
+import mekanism.common.util.StorageUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
-import net.minecraftforge.energy.CapabilityEnergy;
-import net.minecraftforge.energy.IEnergyStorage;
 import net.minecraftforge.fml.common.Optional;
 import net.minecraftforge.items.IItemHandler;
 
 import java.util.ArrayList;
 import java.util.List;
-
-import static mekanism.common.util.ChargeUtils.isIC2Chargeable;
 
 @ParametersAreNotNullByDefault
 public class ModuleChargeDistributionUnit implements ICustomModule<ModuleChargeDistributionUnit> {
@@ -54,7 +46,6 @@ public class ModuleChargeDistributionUnit implements ICustomModule<ModuleChargeD
             chargeInventory(module, player);
         }
 
-
         // distribute suit charge next
         if (chargeSuit.get()) {
             chargeSuit(player);
@@ -65,28 +56,44 @@ public class ModuleChargeDistributionUnit implements ICustomModule<ModuleChargeD
         double total = 0;
         EnergySaveTarget saveTarget = new EnergySaveTarget(4);
         for (ItemStack stack : player.inventory.armorInventory) {
-            if (stack.getItem() instanceof IEnergizedItem item) {
-                saveTarget.addDelegate(stack);
-                total += item.getEnergy(stack);
+            IEnergyContainer energyContainer = StorageUtils.getEnergyContainer(stack, 0);
+            if (energyContainer != null) {
+                saveTarget.addDelegate(energyContainer);
+                total += energyContainer.getEnergy();
             }
         }
-        EmitUtils2.sendToAcceptors(saveTarget, total);
-        saveTarget.save();
+        if (saveTarget.getHandlerCount() > 1) {
+            EmitUtils.sendToAcceptors(saveTarget, total);
+            saveTarget.save();
+        }
     }
 
     private void chargeInventory(IModule<ModuleChargeDistributionUnit> module, EntityPlayer player) {
-        List<ItemStack> stacks = new ArrayList<>();
-        stacks.addAll(player.inventory.offHandInventory);
-        stacks.addAll(player.inventory.mainInventory);
+        IEnergyContainer energyContainer = module.getEnergyContainer();
+        if (energyContainer == null) {
+            return;
+        }
+        double toCharge = Math.min(MekanismConfig.current().meka.mekaSuitInventoryChargeRate.val(), energyContainer.getEnergy());
+        if (toCharge <= 0) {
+            return;
+        }
+        ItemStack mainHand = player.getHeldItemMainhand();
+        ItemStack offHand = player.getHeldItemOffhand();
+        toCharge = charge(energyContainer, mainHand, toCharge);
+        toCharge = charge(energyContainer, offHand, toCharge);
+        if (toCharge <= 0) {
+            return;
+        }
+        List<ItemStack> stacks = new ArrayList<>(player.inventory.mainInventory);
         if (Mekanism.hooks.Baubles) {
             stacks.addAll(chargeBaublesInventory(player));
         }
         for (ItemStack stack : stacks) {
-            if (module.getContainerEnergy() <= 0) {
-                break;
-            }
-            if (canCharge(module, player, stack)) {
-                charge(stack, module, player);
+            if (stack != mainHand && stack != offHand) {
+                toCharge = charge(energyContainer, stack, toCharge);
+                if (toCharge <= 0) {
+                    return;
+                }
             }
         }
     }
@@ -101,66 +108,21 @@ public class ModuleChargeDistributionUnit implements ICustomModule<ModuleChargeD
         return stacks;
     }
 
-    private boolean canCharge(IModule<ModuleChargeDistributionUnit> module, EntityPlayer player, ItemStack stack) {
-        if (!stack.isEmpty()) {
-            return canCharge(stack, module, player);
-        }
-        return false;
-    }
-
-    //也许这个不行
-    public void charge(ItemStack stack, IModule<ModuleChargeDistributionUnit> module, EntityPlayer player) {
-        if (!stack.isEmpty() && module.getContainerEnergy() > 0) {
-            if (stack.getItem() instanceof IEnergizedItem) {
-                module.useEnergy(player, EnergizedItemManager.charge(stack, module.getContainerEnergy()));
-            } else if (MekanismUtils.useTesla() && stack.hasCapability(Capabilities.TESLA_CONSUMER_CAPABILITY, null)) {
-                ITeslaConsumer consumer = stack.getCapability(Capabilities.TESLA_CONSUMER_CAPABILITY, null);
-                long stored = TeslaIntegration.toTesla(module.getContainerEnergy());
-                module.useEnergy(player, TeslaIntegration.fromTesla(consumer.givePower(stored, false)));
-            } else if (MekanismUtils.useForge() && stack.hasCapability(CapabilityEnergy.ENERGY, null)) {
-                IEnergyStorage storage = stack.getCapability(CapabilityEnergy.ENERGY, null);
-                if (storage.canReceive()) {
-                    int stored = ForgeEnergyIntegration.toForge(module.getContainerEnergy());
-                    module.useEnergy(player, ForgeEnergyIntegration.fromForge(storage.receiveEnergy(stored, false)));
+    /**
+     * return rejects
+     */
+    private double charge(IEnergyContainer energyContainer, ItemStack stack, double amount) {
+        if (!stack.isEmpty() && amount > 0) {
+            IStrictEnergyHandler handler = EnergyCompatUtils.getStrictEnergyHandler(stack);
+            if (handler != null) {
+                double remaining = handler.insertEnergy(amount, Action.SIMULATE);
+                if (remaining < amount) {
+                    double extracted = energyContainer.extract(amount - remaining, Action.EXECUTE, AutomationType.MANUAL);
+                    double insertRemainder = handler.insertEnergy(extracted, Action.EXECUTE);
+                    return insertRemainder + remaining;
                 }
-            } else if (MekanismUtils.useRF() && stack.getItem() instanceof IEnergyContainerItem item) {
-                int toTransfer = RFIntegration.toRF(module.getContainerEnergy());
-                module.useEnergy(player, RFIntegration.fromRF(item.receiveEnergy(stack, toTransfer, false)));
-            } else if (MekanismUtils.useIC2() && isIC2Chargeable(stack)) {
-                double sent = IC2Integration.fromEU(ElectricItem.manager.charge(stack, IC2Integration.toEU(module.getContainerEnergy()), 4, true, false));
-                module.useEnergy(player, sent);
             }
         }
-    }
-
-    public boolean canCharge(ItemStack stack, IModule<ModuleChargeDistributionUnit> module, EntityPlayer player) {
-        if (!stack.isEmpty() && module.getContainerEnergy() > 0) {
-            if (stack.getItem() instanceof IEnergizedItem energizedItem) {
-                if (energizedItem.canReceive(stack)) {
-                    double energyToSend = Math.min(energizedItem.getMaxTransfer(stack),
-                            Math.min(energizedItem.getMaxEnergy(stack) - energizedItem.getEnergy(stack), module.getContainerEnergy()));
-                    return module.canUseEnergy(player, energyToSend);
-                }
-                return false;
-            } else if (MekanismUtils.useTesla() && stack.hasCapability(Capabilities.TESLA_CONSUMER_CAPABILITY, null)) {
-                ITeslaConsumer consumer = stack.getCapability(Capabilities.TESLA_CONSUMER_CAPABILITY, null);
-                long stored = TeslaIntegration.toTesla(module.getContainerEnergy());
-                return module.canUseEnergy(player, TeslaIntegration.fromTesla(consumer.givePower(stored, true)));
-            } else if (MekanismUtils.useForge() && stack.hasCapability(CapabilityEnergy.ENERGY, null)) {
-                IEnergyStorage storage = stack.getCapability(CapabilityEnergy.ENERGY, null);
-                if (storage.canReceive()) {
-                    int stored = ForgeEnergyIntegration.toForge(module.getContainerEnergy());
-                    return module.canUseEnergy(player, ForgeEnergyIntegration.fromForge(storage.receiveEnergy(stored, true)));
-                }
-                return false;
-            } else if (MekanismUtils.useRF() && stack.getItem() instanceof IEnergyContainerItem item) {
-                int toTransfer = RFIntegration.toRF(module.getContainerEnergy());
-                return module.canUseEnergy(player, RFIntegration.fromRF(item.receiveEnergy(stack, toTransfer, true)));
-            } else if (MekanismUtils.useIC2() && isIC2Chargeable(stack)) {
-                double sent = IC2Integration.fromEU(ElectricItem.manager.charge(stack, IC2Integration.toEU(module.getContainerEnergy()), 4, true, true));
-                return module.canUseEnergy(player, sent);
-            }
-        }
-        return false;
+        return amount;
     }
 }

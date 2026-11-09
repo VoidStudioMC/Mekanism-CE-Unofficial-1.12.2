@@ -1,92 +1,107 @@
 package mekanism.common.tile;
 
 import io.netty.buffer.ByteBuf;
-import mekanism.api.IConfigurable;
-import mekanism.api.TileNetworkList;
-import mekanism.api.gas.*;
+import mekanism.api.*;
+import mekanism.api.gas.GasStack;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IActiveState;
 import mekanism.common.base.IComparatorSupport;
 import mekanism.common.base.ISustainedData;
 import mekanism.common.base.ITankManager;
-import mekanism.common.capabilities.Capabilities;
-import mekanism.common.capabilities.IToggleableCapability;
-import mekanism.common.tile.prefab.TileEntityBasicBlock;
+import mekanism.common.capabilities.gas.BasicGasTank;
+import mekanism.common.capabilities.holder.gas.GasTankHelper;
+import mekanism.common.capabilities.holder.gas.IGasTankHolder;
+import mekanism.common.lib.radiation.RadiationUtil;
+import mekanism.common.tile.prefab.TileEntityContainerBlock;
 import mekanism.common.util.GasUtils;
+import mekanism.common.util.ItemDataUtils;
 import mekanism.common.util.MekanismUtils;
 import mekanism.common.util.TileUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.init.SoundEvents;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumActionResult;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.SoundCategory;
-import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 
-import javax.annotation.Nonnull;
 import java.util.Collections;
 
-public class TileEntityRadioactiveWasteBarrel extends TileEntityBasicBlock implements ISustainedData, ITankManager, IGasHandler, IToggleableCapability, IComparatorSupport, IActiveState, IConfigurable {
+public class TileEntityRadioactiveWasteBarrel extends TileEntityContainerBlock implements ISustainedData, ITankManager, IComparatorSupport, IActiveState, IConfigurable {
 
     private long lastProcessTick;
-    public GasTank gasTank = new GasTank(512000);
+    public BasicGasTank gasTank;
     private int processTicks;
     public boolean isActive;
     public boolean clientActive;
+
+    public TileEntityRadioactiveWasteBarrel() {
+        super("radioactive_waste_barrel");
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IGasTankHolder getInitialGasTanks(IContentsListener listener) {
+        GasTankHelper builder = createGasTankHelper();
+        gasTank = BasicGasTank.input(512000, gas -> gas != null && gas.isRadiation(), listener);
+        builder.addTank(gasTank, RelativeSide.TOP, RelativeSide.BOTTOM);
+        return builder.build();
+    }
 
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
         if (getWorld().getTotalWorldTime() > lastProcessTick) {
             lastProcessTick = getWorld().getTotalWorldTime();
-            if (gasTank.getGas() != null && gasTank.getGas().getGas().isRadiation() && ++processTicks >= 20) {
+            GasStack stored = gasTank.getGas();
+            int decayAmount = RadiationUtil.getWasteBarrelDecayAmount();
+            if (decayAmount > 0 && RadiationUtil.canDecayInWasteBarrel(stored) &&
+                    ++processTicks >= RadiationUtil.getWasteBarrelProcessTicks()) {
                 processTicks = 0;
-                gasTank.draw(1, true);
+                gasTank.extract(decayAmount, Action.EXECUTE, AutomationType.INTERNAL);
             }
             if (getActive()) {
-                gasTank.draw(GasUtils.emit(gasTank.stored, this, Collections.singleton(EnumFacing.DOWN)), true);
+                GasUtils.emit(Collections.singleton(EnumFacing.DOWN), gasTank, this, getDownOutputLimit());
             }
         }
     }
 
-
-    @Override
-    public int receiveGas(EnumFacing side, GasStack stack, boolean doTransfer) {
-        if (canReceiveGas(side, stack.getGas())) {
-            return gasTank.receive(stack, doTransfer);
+    private int getDownOutputLimit() {
+        TileEntity below = MekanismUtils.getTileEntity(world, pos.down());
+        if (below instanceof TileEntityRadioactiveWasteBarrel) {
+            TileEntityRadioactiveWasteBarrel barrel = (TileEntityRadioactiveWasteBarrel) below;
+            return Math.min(barrel.gasTank.getNeeded(), gasTank.getCapacity());
         }
-        return 0;
-    }
-
-    @Override
-    public GasStack drawGas(EnumFacing side, int amount, boolean doTransfer) {
-        return null;
-    }
-
-    @Override
-    public boolean canReceiveGas(EnumFacing side, Gas type) {
-        return (side == EnumFacing.DOWN || side == EnumFacing.UP) && gasTank.canReceive(type) && type.isRadiation();
-    }
-
-    @Override
-    public boolean canDrawGas(EnumFacing side, Gas type) {
-        return false;
+        return gasTank.getCapacity();
     }
 
     @Override
     public void writeSustainedData(ItemStack itemStack) {
-        GasUtils.writeSustainedData(gasTank, itemStack);
+        writeSustainedGasTanks(itemStack);
+        ItemDataUtils.setLegacyGas(itemStack, "gasStored", gasTank.getGas());
     }
 
     @Override
     public void readSustainedData(ItemStack itemStack) {
-        GasUtils.readSustainedData(gasTank, itemStack);
+        if (!readSustainedGasTanks(itemStack)) {
+            gasTank.setStackUnchecked(ItemDataUtils.getLegacyGas(itemStack, "gasStored"));
+        }
+        sanitizeAndClampGasTank();
+    }
+
+    private void sanitizeAndClampGasTank() {
+        GasStack stored = gasTank.getGas();
+        if (stored != null && (stored.amount <= 0 || stored.getGas() == null || !stored.getGas().isRadiation())) {
+            gasTank.setEmpty();
+        } else if (stored != null) {
+            gasTank.setStackSize(stored.amount, Action.EXECUTE);
+        }
     }
 
     @Override
-    public Object[] getTanks() {
+    public Object[] getManagedTanks() {
         return new Object[]{gasTank};
     }
 
@@ -102,12 +117,6 @@ public class TileEntityRadioactiveWasteBarrel extends TileEntityBasicBlock imple
     @Override
     public EnumActionResult onRightClick(EntityPlayer player, EnumFacing side) {
         return EnumActionResult.PASS;
-    }
-
-    @Override
-    @Nonnull
-    public GasTankInfo[] getTankInfo() {
-        return new GasTankInfo[]{gasTank};
     }
 
     @Override
@@ -132,42 +141,18 @@ public class TileEntityRadioactiveWasteBarrel extends TileEntityBasicBlock imple
     public void readCustomNBT(NBTTagCompound nbtTags) {
         super.readCustomNBT(nbtTags);
         clientActive = isActive = nbtTags.getBoolean("isActive");
-        gasTank.read(nbtTags.getCompoundTag("gasTank"));
+        processTicks = Math.max(0, nbtTags.getInteger(NBTConstants.PROGRESS));
+        if (!hasStoredGasTanks(nbtTags) && nbtTags.hasKey("gasTank")) {
+            gasTank.read(nbtTags.getCompoundTag("gasTank"));
+        }
+        sanitizeAndClampGasTank();
     }
 
     @Override
     public void writeCustomNBT(NBTTagCompound nbtTags) {
         super.writeCustomNBT(nbtTags);
         nbtTags.setBoolean("isActive", isActive);
-        nbtTags.setTag("gasTank", gasTank.write(new NBTTagCompound()));
-    }
-
-    @Override
-    public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing side) {
-        if (isCapabilityDisabled(capability, side)) {
-            return false;
-        }
-        return capability == Capabilities.CONFIGURABLE_CAPABILITY || capability == Capabilities.GAS_HANDLER_CAPABILITY || super.hasCapability(capability, side);
-    }
-
-    @Override
-    public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing side) {
-        if (isCapabilityDisabled(capability, side)) {
-            return null;
-        } else if (capability == Capabilities.CONFIGURABLE_CAPABILITY) {
-            return Capabilities.CONFIGURABLE_CAPABILITY.cast(this);
-        } else if (capability == Capabilities.GAS_HANDLER_CAPABILITY) {
-            return Capabilities.GAS_HANDLER_CAPABILITY.cast(this);
-        }
-        return super.getCapability(capability, side);
-    }
-
-    @Override
-    public boolean isCapabilityDisabled(@Nonnull Capability<?> capability, EnumFacing side) {
-        if (capability == Capabilities.GAS_HANDLER_CAPABILITY) {
-            return side != null && side != EnumFacing.DOWN && side != EnumFacing.UP;
-        }
-        return false;
+        nbtTags.setInteger(NBTConstants.PROGRESS, processTicks);
     }
 
     @Override
@@ -198,6 +183,11 @@ public class TileEntityRadioactiveWasteBarrel extends TileEntityBasicBlock imple
     @Override
     public boolean lightUpdate() {
         return false;
+    }
+
+    @Override
+    public boolean isComparatorInput(mekanism.api.transmitters.TransmissionType type) {
+        return type == mekanism.api.transmitters.TransmissionType.GAS;
     }
 
     @Override

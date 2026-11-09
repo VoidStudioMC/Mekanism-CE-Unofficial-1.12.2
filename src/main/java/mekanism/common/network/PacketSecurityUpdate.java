@@ -18,6 +18,8 @@ import java.util.UUID;
 
 public class PacketSecurityUpdate implements IMessageHandler<SecurityUpdateMessage, IMessage> {
 
+    private static final int MAX_SECURITY_ENTRIES = 65_536;
+
     @Override
     public IMessage onMessage(SecurityUpdateMessage message, MessageContext context) {
         if (message.packetType == SecurityPacket.UPDATE) {
@@ -66,12 +68,7 @@ public class PacketSecurityUpdate implements IMessageHandler<SecurityUpdateMessa
                     dataStream.writeBoolean(false);
                 }
             } else if (packetType == SecurityPacket.FULL) {
-                List<SecurityFrequency> frequencies = new ArrayList<>();
-                Mekanism.securityFrequencies.getFrequencies().forEach(frequency -> {
-                    if (frequency instanceof SecurityFrequency securityFrequency) {
-                        frequencies.add(securityFrequency);
-                    }
-                });
+                List<SecurityFrequency> frequencies = new ArrayList<>(Mekanism.securityFrequencies.getFrequencies());
                 dataStream.writeInt(frequencies.size());
                 frequencies.forEach(frequency -> {
                     PacketHandler.writeString(dataStream, frequency.ownerUUID.toString());
@@ -83,7 +80,7 @@ public class PacketSecurityUpdate implements IMessageHandler<SecurityUpdateMessa
 
         @Override
         public void fromBytes(ByteBuf dataStream) {
-            packetType = SecurityPacket.values()[dataStream.readInt()];
+            packetType = MekanismUtils.getByIndex(SecurityPacket.values(), dataStream.readInt(), SecurityPacket.UPDATE);
             if (packetType == SecurityPacket.UPDATE) {
                 playerUUID = UUID.fromString(PacketHandler.readString(dataStream));
                 playerUsername = PacketHandler.readString(dataStream);
@@ -92,8 +89,11 @@ public class PacketSecurityUpdate implements IMessageHandler<SecurityUpdateMessa
                 }
                 MekanismClient.clientUUIDMap.put(playerUUID, playerUsername);
             } else if (packetType == SecurityPacket.FULL) {
-                MekanismClient.clientSecurityMap.clear();
                 int amount = dataStream.readInt();
+                if (amount < 0 || amount > MAX_SECURITY_ENTRIES) {
+                    throw new IllegalArgumentException("Invalid security entry count: " + amount);
+                }
+                MekanismClient.clientSecurityMap.clear();
                 for (int i = 0; i < amount; i++) {
                     UUID uuid = UUID.fromString(PacketHandler.readString(dataStream));
                     String username = PacketHandler.readString(dataStream);

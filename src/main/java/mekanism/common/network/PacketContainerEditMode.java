@@ -4,8 +4,8 @@ import io.netty.buffer.ByteBuf;
 import mekanism.api.Coord4D;
 import mekanism.common.PacketHandler;
 import mekanism.common.base.IFluidContainerManager;
+import mekanism.common.base.IFluidContainerManager.ContainerEditMode;
 import mekanism.common.network.PacketContainerEditMode.ContainerEditModeMessage;
-import mekanism.common.util.FluidContainerUtils.ContainerEditMode;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraftforge.fml.common.network.simpleimpl.IMessage;
@@ -17,8 +17,14 @@ public class PacketContainerEditMode implements IMessageHandler<ContainerEditMod
     @Override
     public IMessage onMessage(ContainerEditModeMessage message, MessageContext context) {
         EntityPlayer player = PacketHandler.getPlayer(context);
+        if (player == null) {
+            return null;
+        }
         PacketHandler.handlePacket(() -> {
             TileEntity tileEntity = message.coord4D.getTileEntity(player.world);
+            if (!PacketHandler.canAccessTile(player, tileEntity)) {
+                return;
+            }
             if (tileEntity instanceof IFluidContainerManager manager) {
                 manager.setContainerEditMode(message.value);
             }
@@ -48,7 +54,7 @@ public class PacketContainerEditMode implements IMessageHandler<ContainerEditMod
         @Override
         public void fromBytes(ByteBuf dataStream) {
             coord4D = Coord4D.read(dataStream);
-            value = ContainerEditMode.values()[dataStream.readInt()];
+            value = ContainerEditMode.byIndexStatic(dataStream.readInt());
         }
     }
 }

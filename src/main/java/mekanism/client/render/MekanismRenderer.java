@@ -6,6 +6,7 @@ import mekanism.api.gas.GasRegistry;
 import mekanism.api.gas.GasStack;
 import mekanism.api.infuse.InfuseRegistry;
 import mekanism.api.transmitters.TransmissionType;
+import mekanism.client.render.item.machine.RenderFluidTankItem;
 import mekanism.client.render.obj.TransmitterModel;
 import mekanism.client.render.tileentity.*;
 import mekanism.client.render.transmitter.RenderLogisticalTransporter;
@@ -56,6 +57,7 @@ public class MekanismRenderer {
     public static TextureAtlasSprite energyIcon;
     public static TextureAtlasSprite heatIcon;
     public static TextureAtlasSprite laserIcon;
+    public static TextureAtlasSprite redstonePulse;
     public static TextureAtlasSprite whiteIcon;
     public static Map<TransmissionType, TextureAtlasSprite> overlays = new EnumMap<>(TransmissionType.class);
     private static RenderConfigurableMachine machineRenderer = new RenderConfigurableMachine();
@@ -218,6 +220,40 @@ public class MekanismRenderer {
         GlStateManager.color(1, 1, 1, 1);
     }
 
+    public static void resetGuiRenderState() {
+        resetColor();
+        GlStateManager.setActiveTexture(OpenGlHelper.defaultTexUnit);
+        GlStateManager.enableTexture2D();
+        GlStateManager.disableLighting();
+        GlStateManager.enableAlpha();
+        GlStateManager.disableBlend();
+        GlStateManager.enableDepth();
+        GlStateManager.depthMask(true);
+        GlStateManager.shadeModel(GL11.GL_FLAT);
+    }
+
+    public static void resetItemRenderState() {
+        resetColor();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
+        GlStateManager.enableAlpha();
+        GlStateManager.disableBlend();
+        GlStateManager.enableDepth();
+        GlStateManager.depthMask(true);
+        GlStateManager.enableTexture2D();
+        GlStateManager.enableCull();
+    }
+
+    public static void resetBlockRenderState() {
+        resetColor();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
+        GlStateManager.enableAlpha();
+        GlStateManager.disableBlend();
+        GlStateManager.enableLighting();
+        GlStateManager.disableCull();
+        GlStateManager.depthMask(true);
+        GlStateManager.enableTexture2D();
+    }
+
     private static float getRed(int color) {
         return (color >> 16 & 0xFF) / 255.0F;
     }
@@ -229,6 +265,7 @@ public class MekanismRenderer {
     private static float getBlue(int color) {
         return (color & 0xFF) / 255.0F;
     }
+
     public static float getAlpha(int color) {
         return (color >> 24 & 0xFF) / 255.0F;
     }
@@ -420,6 +457,7 @@ public class MekanismRenderer {
         energyIcon = event.getMap().registerSprite(new ResourceLocation(Mekanism.MODID, "blocks/liquid/LiquidEnergy"));
         heatIcon = event.getMap().registerSprite(new ResourceLocation(Mekanism.MODID, "blocks/liquid/LiquidHeat"));
         laserIcon = event.getMap().registerSprite(new ResourceLocation(Mekanism.MODID, "blocks/Laser"));
+        redstonePulse = event.getMap().registerSprite(new ResourceLocation(Mekanism.MODID, "icon/redstone_control_pulse"));
 
         event.getMap().registerSprite(new ResourceLocation(Mekanism.MODID, "blocks/liquid/LiquidHeavyWater"));
 
@@ -428,7 +466,11 @@ public class MekanismRenderer {
         InfuseRegistry.getInfuseMap().values().forEach(type -> type.setIcon(event.getMap().registerSprite(type.iconResource)));
 
         FluidRenderer.resetDisplayInts();
+        MinerVisualRenderer.resetDisplayInts();
         RenderFluidTank.resetDisplayInts();
+        RenderFluidTankItem.resetDisplayInts();
+        RenderTeleporter.resetDisplayInts();
+        RenderConfigurableMachine.resetDisplayInts();
         RenderNutritionalLiquifier.resetDisplayInts();
         RenderIsotopicCentrifuge.resetDisplayInts();
         RenderChemicalCrystallizer.resetDisplayInts();
@@ -536,6 +578,23 @@ public class MekanismRenderer {
             GlStateManager.glEndList();
         }
 
+        public static void deleteAll(DisplayInteger[] displays) {
+            if (displays != null) {
+                for (DisplayInteger display : displays) {
+                    if (display != null) {
+                        display.delete();
+                    }
+                }
+            }
+        }
+
+        public void delete() {
+            if (display != 0) {
+                GLAllocation.deleteDisplayLists(display);
+                display = 0;
+            }
+        }
+
         @Override
         public int hashCode() {
             int code = 1;
@@ -591,10 +650,10 @@ public class MekanismRenderer {
         Tessellator tessellator = Tessellator.getInstance();
         BufferBuilder bufferbuilder = tessellator.getBuffer();
         bufferbuilder.begin(GL11.GL_QUADS, DefaultVertexFormats.POSITION_COLOR);
-        bufferbuilder.pos( width, y, 0).color(r, g, b, a).endVertex();
-        bufferbuilder.pos( x, y, 0).color(r, g, b, a).endVertex();
-        bufferbuilder.pos( x, height, 0).color(r, g, b, a).endVertex();
-        bufferbuilder.pos( width, height, 0).color(r, g, b, a).endVertex();
+        bufferbuilder.pos(width, y, 0).color(r, g, b, a).endVertex();
+        bufferbuilder.pos(x, y, 0).color(r, g, b, a).endVertex();
+        bufferbuilder.pos(x, height, 0).color(r, g, b, a).endVertex();
+        bufferbuilder.pos(width, height, 0).color(r, g, b, a).endVertex();
         tessellator.draw();
         GlStateManager.shadeModel(GL11.GL_FLAT);
         GlStateManager.disableBlend();

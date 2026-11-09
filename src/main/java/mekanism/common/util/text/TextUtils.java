@@ -2,6 +2,7 @@ package mekanism.common.util.text;
 
 import mekanism.common.util.LangUtils;
 
+import java.math.BigInteger;
 import java.text.NumberFormat;
 
 public final class TextUtils {
@@ -15,13 +16,26 @@ public final class TextUtils {
     private static final NumberFormat doubleFormatter = NumberFormat.getNumberInstance();
 
     public static String getPercent(double ratio) {
-        return (Math.round(ratio * 100)) + LangUtils.localize("generic.mekanism.percent") ;
+        return (Math.round(ratio * 100)) + LangUtils.localize("generic.mekanism.percent");
     }
 
     public static String getHoursMinutes(int seconds) {
-        int minutes = (int) Math.ceil(seconds / 60.0);
-        int hours = minutes / 60;
-        return hours > 0 ?LangUtils.localize("generic.mekanism.hours_minutes")+ hours +  minutes % 60 : LangUtils.localize("generic.mekanism.minutes") + minutes;
+        return getHoursMinutesFromSeconds(Math.max(0, seconds));
+    }
+
+    public static String getHoursMinutesFromTicks(long ticks) {
+        if (ticks == Long.MAX_VALUE) {
+            return LangUtils.localize("generic.mekanism.never");
+        }
+        long seconds = ticks <= 0 ? 0 : (long) Math.ceil(ticks / 20.0);
+        return getHoursMinutesFromSeconds(seconds);
+    }
+
+    private static String getHoursMinutesFromSeconds(long seconds) {
+        long minutes = (long) Math.ceil(seconds / 60.0);
+        long hours = minutes / 60;
+        return hours > 0 ? LangUtils.localizeWithFormat("generic.mekanism.hours_minutes", hours, minutes % 60)
+                : LangUtils.localizeWithFormat("generic.mekanism.minutes", minutes);
     }
 
     public static String format(long count) {
@@ -30,6 +44,10 @@ public final class TextUtils {
 
     public static String format(double count) {
         return doubleFormatter.format(count);
+    }
+
+    public static String format(BigInteger count) {
+        return intFormatter.format(count);
     }
 
     public static String hex(boolean prefix, int bytes, long value) {

@@ -4,19 +4,19 @@ import io.netty.buffer.ByteBuf;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import mekanism.api.Coord4D;
 import mekanism.api.TileNetworkList;
+import mekanism.api.gas.GasStack;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IFluidContainerManager;
+import mekanism.common.base.ITankManager;
 import mekanism.common.block.BlockBasic;
+import mekanism.common.capabilities.merged.MergedTank.CurrentType;
 import mekanism.common.content.tank.SynchronizedTankData;
 import mekanism.common.content.tank.SynchronizedTankData.ValveData;
 import mekanism.common.content.tank.TankCache;
 import mekanism.common.content.tank.TankUpdateProtocol;
 import mekanism.common.integration.computer.IComputerIntegration;
 import mekanism.common.multiblock.MultiblockManager;
-import mekanism.common.util.FluidContainerUtils;
-import mekanism.common.util.FluidContainerUtils.ContainerEditMode;
 import mekanism.common.util.InventoryUtils;
-import mekanism.common.util.NonNullListSynchronized;
 import mekanism.common.util.TileUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
@@ -29,9 +29,10 @@ import net.minecraftforge.items.CapabilityItemHandler;
 import javax.annotation.Nonnull;
 import java.util.Set;
 
-public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTankData> implements IComputerIntegration, IFluidContainerManager {
+public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTankData> implements IComputerIntegration, IFluidContainerManager, ITankManager {
 
     protected static final int[] SLOTS = {0, 1};
+    private static final Object[] NO_TANKS = new Object[0];
 
     public static final String[] methods = new String[]{"getAmount", "getCapacity", "getLiquidType"};
 
@@ -53,7 +54,6 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
 
     public TileEntityDynamicTank(String name) {
         super(name);
-        inventory = NonNullListSynchronized.withSize(SLOTS.length, ItemStack.EMPTY);
     }
 
     @Override
@@ -61,7 +61,7 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
         super.onUpdateClient();
         if (clientHasStructure && isRendering) {
             if (structure != null) {
-                float targetScale = (float) (structure.fluidStored != null ? structure.fluidStored.amount : structure.gasstored != null ? structure.gasstored.amount : 0) / clientCapacity;
+                float targetScale = clientCapacity <= 0 ? 0 : (float) (structure.fluidStored != null ? structure.fluidStored.amount : structure.gasstored != null ? structure.gasstored.amount : 0) / clientCapacity;
                 if (Math.abs(prevScale - targetScale) > 0.01) {
                     prevScale = (9 * prevScale + targetScale) / 10;
                 }
@@ -81,14 +81,10 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
     public void onUpdateServer() {
         super.onUpdateServer();
         if (structure != null) {
-            if (structure.fluidStored != null && structure.fluidStored.amount <= 0) {
-                structure.fluidStored = null;
-                markNoUpdateSync();
-            } else if (structure.gasstored != null && structure.gasstored.amount <= 0) {
-                structure.gasstored = null;
+            if (structure.sanitizeStoredSubstances()) {
                 markNoUpdateSync();
             }
-            if (isRendering) {
+            if (tryClaimStructureServerTick()) {
                 boolean needsValveUpdate = false;
                 for (ValveData data : structure.valves) {
                     if (data.activeTicks > 0) {
@@ -105,17 +101,52 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
                 structure.prevFluid = structure.fluidStored != null ? structure.fluidStored.copy() : null;
                 structure.prevGas = structure.gasstored != null ? structure.gasstored.copy() : null;
                 manageInventory();
+                syncCachedDataFromStructure();
             }
         }
     }
 
-    //todo
     public void manageInventory() {
-        int neededFluid = (structure.volume * TankUpdateProtocol.FLUID_PER_TANK) - (structure.fluidStored != null ? structure.fluidStored.amount : 0);
-        if (FluidContainerUtils.isFluidContainer(structure.inventory.get(0))) {
-            structure.fluidStored = FluidContainerUtils.handleContainerItem(this, structure.inventory, structure.editMode, structure.fluidStored, neededFluid, 0, 1, null);
+        if (structure == null) {
+            return;
+        }
+        ItemStack previousInput = structure.inputSlot.getStack().copy();
+        ItemStack previousOutput = structure.outputSlot.getStack().copy();
+        GasStack previousGas = structure.gasstored == null ? null : structure.gasstored.copy();
+        net.minecraftforge.fluids.FluidStack previousFluid = structure.fluidStored == null ? null : structure.fluidStored.copy();
+        CurrentType currentType = structure.inventoryMergedTank.getCurrentType();
+        if (currentType == CurrentType.EMPTY) {
+            structure.inputSlot.handleTank(structure.outputSlot, structure.editMode);
+            structure.inputSlot.drainGasTank();
+            structure.outputSlot.fillGasTank();
+        } else if (currentType == CurrentType.FLUID) {
+            structure.inputSlot.handleTank(structure.outputSlot, structure.editMode);
+        } else if (currentType.isGas()) {
+            structure.inputSlot.drainGasTank();
+            structure.outputSlot.fillGasTank();
+        }
+        boolean sanitized = structure.sanitizeStoredSubstances();
+        boolean changed = sanitized || !gasStacksEqual(previousGas, structure.gasstored) || !fluidStacksEqual(previousFluid, structure.fluidStored)
+                || !ItemStack.areItemStacksEqual(previousInput, structure.inputSlot.getStack())
+                || !ItemStack.areItemStacksEqual(previousOutput, structure.outputSlot.getStack());
+        if (changed) {
+            markNoUpdateSync();
             Mekanism.packetHandler.sendUpdatePacket(this);
         }
+    }
+
+    private static boolean fluidStacksEqual(net.minecraftforge.fluids.FluidStack first, net.minecraftforge.fluids.FluidStack second) {
+        if (first == null || second == null) {
+            return first == second;
+        }
+        return first.amount == second.amount && first.isFluidEqual(second);
+    }
+
+    private static boolean gasStacksEqual(GasStack first, GasStack second) {
+        if (first == null || second == null) {
+            return first == second;
+        }
+        return first.amount == second.amount && first.isGasEqual(second);
     }
 
     @Override
@@ -135,7 +166,7 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
 
     @Override
     protected SynchronizedTankData getNewStructure() {
-        return new SynchronizedTankData();
+        return new SynchronizedTankData(this);
     }
 
     @Override
@@ -184,9 +215,10 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
             if (clientHasStructure) {
                 clientCapacity = dataStream.readInt();
-                structure.editMode = ContainerEditMode.values()[dataStream.readInt()];
+                structure.editMode = ContainerEditMode.byIndexStatic(dataStream.readInt());
                 structure.fluidStored = TileUtils.readFluidStack(dataStream);
                 structure.gasstored = TileUtils.readGasStack(dataStream);
+                structure.sanitizeStoredSubstances();
                 if (isRendering) {
                     int size = dataStream.readInt();
                     valveViewing.clear();
@@ -222,24 +254,37 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
 
     @Override
     public void setContainerEditMode(ContainerEditMode mode) {
-        if (structure == null) {
-            return;
+        if (structure != null && structure.editMode != mode) {
+            structure.editMode = mode;
+            markNoUpdateSync();
+            Mekanism.packetHandler.sendUpdatePacket(this);
         }
-        structure.editMode = mode;
     }
 
     @Nonnull
     @Override
     public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return InventoryUtils.EMPTY;
+        return exposesInventoryToAutomation() ? super.getSlotsForFace(side) : InventoryUtils.EMPTY;
     }
 
     @Override
     public boolean isCapabilityDisabled(@Nonnull Capability<?> capability, EnumFacing side) {
-        if (capability == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) {
+        if (capability == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY && !exposesInventoryToAutomation()) {
             return true;
         }
         return super.isCapabilityDisabled(capability, side);
+    }
+
+    protected boolean exposesInventoryToAutomation() {
+        return false;
+    }
+
+    @Override
+    public Object[] getManagedTanks() {
+        if (structure == null) {
+            return NO_TANKS;
+        }
+        return new Object[]{structure.inventoryMergedTank.getFluidTank(), structure.inventoryMergedTank.getGasTank()};
     }
 
     @Override
@@ -252,7 +297,7 @@ public class TileEntityDynamicTank extends TileEntityMultiblock<SynchronizedTank
         return switch (method) {
             case 0 ->
                     new Object[]{structure != null ? structure.fluidStored != null ? structure.fluidStored.amount : structure.gasstored != null ? structure.gasstored.amount : 0 : 0};
-            case 1 -> new Object[]{structure != null ? structure.volume : 0};
+            case 1 -> new Object[]{structure != null ? structure.volume * TankUpdateProtocol.FLUID_PER_TANK : 0};
             case 2 ->
                     new Object[]{structure != null ? structure.fluidStored != null ? structure.fluidStored.getLocalizedName() : structure.gasstored != null ? structure.gasstored.getGas().getLocalizedName() : null : null};
             default -> throw new NoSuchMethodException();

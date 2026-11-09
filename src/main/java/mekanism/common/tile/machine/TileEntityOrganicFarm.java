@@ -1,53 +1,37 @@
 package mekanism.common.tile.machine;
 
+import mekanism.api.Coord4D;
 import mekanism.api.gas.Gas;
-import mekanism.api.gas.GasStack;
-import mekanism.api.transmitters.TransmissionType;
-import mekanism.common.SideData;
+import mekanism.common.base.IBoundingBlock;
 import mekanism.common.block.states.BlockStateMachine.MachineType;
 import mekanism.common.recipe.RecipeHandler.Recipe;
-import mekanism.common.recipe.inputs.AdvancedMachineInput;
+import mekanism.common.recipe.inputs.FarmInput;
 import mekanism.common.recipe.machines.FarmRecipe;
-import mekanism.common.tile.component.config.DataType;
 import mekanism.common.tile.prefab.TileEntityFarmMachine;
-import mekanism.common.util.InventoryUtils;
-import net.minecraft.util.EnumFacing;
+import net.minecraft.util.math.BlockPos;
+import net.minecraftforge.fluids.Fluid;
 
 import java.util.Map;
+import java.util.function.BiConsumer;
 
-public class TileEntityOrganicFarm extends TileEntityFarmMachine<FarmRecipe> {
+public class TileEntityOrganicFarm extends TileEntityFarmMachine<FarmRecipe> implements IBoundingBlock {
     public TileEntityOrganicFarm() {
         super("injection", MachineType.ORGANIC_FARM, BASE_TICKS_REQUIRED, BASE_GAS_PER_TICK);
-        configComponent.addSupported(TransmissionType.GAS);
-        configComponent.addOutput(TransmissionType.GAS, new SideData(DataType.NONE, InventoryUtils.EMPTY));
-        configComponent.addOutput(TransmissionType.GAS, new SideData(DataType.GAS, new int[]{0}));
-        configComponent.fillConfig(TransmissionType.GAS, 1);
-        configComponent.setCanEject(TransmissionType.GAS, false);
     }
 
     @Override
-    public Map<AdvancedMachineInput, FarmRecipe> getRecipes() {
+    public Map<FarmInput, FarmRecipe> getRecipes() {
         return Recipe.ORGANIC_FARM.get();
     }
 
     @Override
-    public int receiveGas(EnumFacing side, GasStack stack, boolean doTransfer) {
-        if (canReceiveGas(side, stack.getGas())) {
-            return gasTank.receive(stack, doTransfer);
-        }
-        return 0;
-    }
-
-    @Override
-    public boolean canReceiveGas(EnumFacing side, Gas type) {
-        return configComponent.getOutput(TransmissionType.GAS, side, facing).hasSlot(0) && gasTank.canReceive(type) && isValidGas(type);
-
-    }
-
-
-    @Override
     public boolean isValidGas(Gas gas) {
         return Recipe.ORGANIC_FARM.containsRecipe(gas);
+    }
+
+    @Override
+    public boolean isValidFluid(Fluid fluid) {
+        return Recipe.ORGANIC_FARM.containsRecipe(fluid);
     }
 
     @Override
@@ -58,6 +42,21 @@ public class TileEntityOrganicFarm extends TileEntityFarmMachine<FarmRecipe> {
     @Override
     public boolean useStatisticalMechanics() {
         return true;
+    }
+
+    @Override
+    public void collectBoundingBlocks(BiConsumer<BlockPos, Boolean> consumer) {
+        consumer.accept(getPos().up(), false);
+    }
+
+    @Override
+    public void onPlace() {
+        tryPlaceBoundingBlocks(world, Coord4D.get(this));
+    }
+
+    @Override
+    public void onBreak() {
+        removeBoundingBlocks(world, getPos());
     }
 
 }

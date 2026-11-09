@@ -1926,10 +1926,16 @@ public class ModelLargeWindGenerator extends ModelBase {
     }
 
     public void renderBlock(double tick, float size, double angle, boolean on, TextureManager manager, boolean isEnableGlow) {
+        renderBlock(tick, size, angle, on, manager, isEnableGlow, true);
+    }
+
+    public void renderBlock(double tick, float size, double angle, boolean on, TextureManager manager, boolean isEnableGlow, boolean renderFans) {
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
         doRender(size);
-        doRenderFansBlock(size, angle);
+        if (renderFans) {
+            doRenderFansBlock(size, angle);
+        }
         GlStateManager.popMatrix();
         if (isEnableGlow) {
             GlStateManager.pushMatrix();
@@ -1941,15 +1947,20 @@ public class ModelLargeWindGenerator extends ModelBase {
             GlStateManager.scale(1.001F, 1.001F, 1.001F);
             GlStateManager.translate(-0.0011F, -0.0011F, -0.0011F);
             MekanismRenderer.GlowInfo glowInfo = MekanismRenderer.enableGlow();
-            doRenderGlow(size, angle);
+            doRenderGlow(size, angle, renderFans);
             MekanismRenderer.disableGlow(glowInfo);
             GlStateManager.disableBlend();
             GlStateManager.enableAlpha();
+            GlStateManager.shadeModel(GL11.GL_FLAT);
             GlStateManager.popMatrix();
         }
     }
 
     public void renderBloom(double tick, float size, double angle, boolean on, TextureManager manager) {
+        renderBloom(tick, size, angle, on, manager, true);
+    }
+
+    public void renderBloom(double tick, float size, double angle, boolean on, TextureManager manager, boolean renderFans) {
         GlStateManager.pushMatrix();
         GlStateManager.shadeModel(GL11.GL_SMOOTH);
         GlStateManager.disableAlpha();
@@ -1959,10 +1970,11 @@ public class ModelLargeWindGenerator extends ModelBase {
         GlStateManager.scale(1.0011F, 1.0011F, 1.0011F);
         GlStateManager.translate(-0.0012F, -0.0012F, -0.0012F);
         MekanismRenderer.GlowInfo glowInfo = MekanismRenderer.enableGlow();
-        doRenderGlow(size, angle);
+        doRenderGlow(size, angle, renderFans);
         MekanismRenderer.disableGlow(glowInfo);
         GlStateManager.disableBlend();
         GlStateManager.enableAlpha();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
         GlStateManager.popMatrix();
     }
 
@@ -1995,13 +2007,21 @@ public class ModelLargeWindGenerator extends ModelBase {
         fans.render(size);
     }
 
-    private void doRenderGlow(float size, double angle) {
+    private void doRenderGlow(float size, double angle, boolean renderFans) {
         wind_power_middle.render(size);
-        doRenderFansBlock(size, angle);
+        if (renderFans) {
+            doRenderFansBlock(size, angle);
+        }
         south_controller.render(size);
         west_io.render(size);
         east_io.render(size);
         north_io.render(size);
+    }
+
+    public void applySelectionFanAngle(double angle) {
+        if (MekanismConfig.current().client.windGeneratorRotating.val()) {
+            setRotation(fans, 0F, 0F, getRotation(getAbsoluteAngle(angle)));
+        }
     }
 
 

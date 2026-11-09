@@ -1,8 +1,6 @@
 package mekanism.common;
 
 import com.mojang.authlib.GameProfile;
-import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
-import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import mekanism.api.Coord4D;
 import mekanism.api.MekanismAPI;
 import mekanism.api.MekanismAPI.BoxBlacklistEvent;
@@ -16,6 +14,7 @@ import mekanism.client.ClientTickHandler;
 import mekanism.client.render.hud.MekaSuitEnergyLevel;
 import mekanism.client.render.hud.MekanismHUD;
 import mekanism.client.render.hud.MekanismStatusOverlay;
+import mekanism.common.advancements.MekanismCriteriaTriggers;
 import mekanism.common.base.IModule;
 import mekanism.common.capabilities.Capabilities;
 import mekanism.common.chunkloading.ChunkManager;
@@ -28,7 +27,10 @@ import mekanism.common.content.gear.MekaSuitDispenseBehavior;
 import mekanism.common.content.gear.ModuleDispenseBehavior;
 import mekanism.common.content.gear.ModuleHelper;
 import mekanism.common.content.matrix.SynchronizedMatrixData;
+import mekanism.common.content.qio.QIOStorageManager;
+import mekanism.common.content.sps.SynchronizedSPSData;
 import mekanism.common.content.tank.SynchronizedTankData;
+import mekanism.common.content.teleporter.TeleporterFrequency;
 import mekanism.common.content.transporter.PathfinderCache;
 import mekanism.common.content.transporter.TransporterManager;
 import mekanism.common.entity.EntityBalloon;
@@ -37,10 +39,11 @@ import mekanism.common.entity.EntityObsidianTNT;
 import mekanism.common.entity.EntityRobit;
 import mekanism.common.entity.baby.*;
 import mekanism.common.fixers.MekanismDataFixers;
-import mekanism.common.frequency.Frequency;
 import mekanism.common.frequency.FrequencyManager;
+import mekanism.common.frequency.FrequencyType;
 import mekanism.common.integration.IMCHandler;
 import mekanism.common.integration.MekanismHooks;
+import mekanism.common.integration.crafttweaker.CrafttweakerIntegration;
 import mekanism.common.integration.multipart.MultipartMekanism;
 import mekanism.common.lib.radiation.RadiationManager;
 import mekanism.common.multiblock.MultiblockManager;
@@ -54,14 +57,20 @@ import mekanism.common.recipe.RecipeHandler.Recipe;
 import mekanism.common.recipe.inputs.ItemStackInput;
 import mekanism.common.recipe.machines.SmeltingRecipe;
 import mekanism.common.recipe.outputs.ItemStackOutput;
+import mekanism.common.security.ISecurityTile.SecurityMode;
 import mekanism.common.security.SecurityFrequency;
 import mekanism.common.tile.*;
-import mekanism.common.tile.factory.*;
+import mekanism.common.tile.factory.TileEntityAdvancedFactory;
+import mekanism.common.tile.factory.TileEntityBasicFactory;
+import mekanism.common.tile.factory.TileEntityEliteFactory;
+import mekanism.common.tile.factory.TileEntityUltimateFactory;
 import mekanism.common.tile.laser.TileEntityLaser;
 import mekanism.common.tile.laser.TileEntityLaserAmplifier;
 import mekanism.common.tile.laser.TileEntityLaserTractorBeam;
 import mekanism.common.tile.machine.*;
 import mekanism.common.tile.multiblock.*;
+import mekanism.common.tile.prefab.MekanismMachineRecipeProviders;
+import mekanism.common.tile.qio.*;
 import mekanism.common.tile.transmitter.*;
 import mekanism.common.transmitters.grid.EnergyNetwork.EnergyTransferEvent;
 import mekanism.common.transmitters.grid.FluidNetwork.FluidTransferEvent;
@@ -75,8 +84,10 @@ import net.minecraft.dispenser.IBehaviorDispenseItem;
 import net.minecraft.entity.EnumCreatureType;
 import net.minecraft.init.Blocks;
 import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.item.crafting.FurnaceRecipes;
 import net.minecraft.item.crafting.IRecipe;
+import net.minecraft.item.crafting.Ingredient;
 import net.minecraft.launchwrapper.Launch;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
@@ -97,23 +108,25 @@ import net.minecraftforge.event.RegistryEvent;
 import net.minecraftforge.event.world.ChunkDataEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.client.event.ConfigChangedEvent;
-import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.Mod.EventHandler;
 import net.minecraftforge.fml.common.Mod.Instance;
 import net.minecraftforge.fml.common.SidedProxy;
 import net.minecraftforge.fml.common.event.*;
+import net.minecraftforge.fml.common.eventhandler.EventPriority;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.network.NetworkRegistry;
 import net.minecraftforge.fml.common.registry.EntityEntry;
 import net.minecraftforge.fml.common.registry.EntityRegistry;
 import net.minecraftforge.fml.common.registry.ForgeRegistries;
 import net.minecraftforge.fml.common.registry.GameRegistry;
+import net.minecraftforge.registries.IForgeRegistryModifiable;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.io.File;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Mod(modid = Tags.MOD_ID,
         useMetadata = true,
@@ -165,10 +178,24 @@ public class Mekanism {
 
     public static Configuration configurationMultiblockMachine;
     public static Configuration configurationMeka;
+    public static Configuration configurationQIOProcessing;
+
+    /**
+     * Returns the shared QIO Processing configuration, creating it lazily when a client opens
+     * the Forge config GUI before the common mod pre-init callback has run.
+     */
+    public static synchronized Configuration getQIOProcessingConfiguration() {
+        if (configurationQIOProcessing == null) {
+            configurationQIOProcessing = new Configuration(
+                    new File("config/mekanism/MekanismQIOProcessing.cfg"));
+        }
+        return configurationQIOProcessing;
+    }
+
     /**
      * Mekanism version number
      */
-    public static Version versionNumber = new Version(999, 999, 999);
+    public static Version versionNumber = Version.get(Tags.VERSION);
     /**
      * MultiblockManagers for various structrures
      */
@@ -176,14 +203,13 @@ public class Mekanism {
     public static MultiblockManager<SynchronizedMatrixData> matrixManager = new MultiblockManager<>("inductionMatrix");
     public static MultiblockManager<SynchronizedBoilerData> boilerManager = new MultiblockManager<>(
             "thermoelectricBoiler");
+    public static MultiblockManager<SynchronizedSPSData> spsManager = new MultiblockManager<>("supercriticalPhaseShifter");
     /**
      * FrequencyManagers for various networks
      */
-    public static FrequencyManager publicTeleporters = new FrequencyManager(Frequency.class, Frequency.TELEPORTER);
-    public static Map<UUID, FrequencyManager> privateTeleporters = new Object2ObjectOpenHashMap<>();
-    public static FrequencyManager publicEntangloporters = new FrequencyManager(InventoryFrequency.class, InventoryFrequency.ENTANGLOPORTER);
-    public static Map<UUID, FrequencyManager> privateEntangloporters = new Object2ObjectOpenHashMap<>();
-    public static FrequencyManager securityFrequencies = new FrequencyManager(SecurityFrequency.class, SecurityFrequency.SECURITY);
+    public static FrequencyManager<TeleporterFrequency> publicTeleporters = FrequencyType.TELEPORTER.getManager(null, SecurityMode.PUBLIC);
+    public static FrequencyManager<InventoryFrequency> publicEntangloporters = FrequencyType.INVENTORY.getManager(null, SecurityMode.PUBLIC);
+    public static FrequencyManager<SecurityFrequency> securityFrequencies = FrequencyType.SECURITY.getManager(null, SecurityMode.PUBLIC);
     /**
      * Mekanism creative tab
      */
@@ -214,7 +240,7 @@ public class Mekanism {
      */
     public static GameProfile gameProfile = new GameProfile(UUID.nameUUIDFromBytes("mekanism.common".getBytes()), Mekanism.LOG_TAG);
     public static KeySync keyMap = new KeySync();
-    public static Set<Coord4D> activeVibrators = new ObjectOpenHashSet<>();
+    public static Set<Coord4D> activeVibrators = ConcurrentHashMap.newKeySet();
 
     public static final TaskExecutor EXECUTE_MANAGER = new TaskExecutor();
 
@@ -226,7 +252,7 @@ public class Mekanism {
     public static void registerBlocks(RegistryEvent.Register<Block> event) {
         // Register blocks and tile entities
         MekanismBlocks.registerBlocks(event.getRegistry());
-       // event.getRegistry().register(PortalHelper.BlockPortalOverride.instance);
+        // event.getRegistry().register(PortalHelper.BlockPortalOverride.instance);
     }
 
     @SubscribeEvent
@@ -267,11 +293,91 @@ public class Mekanism {
 
     @SubscribeEvent
     public static void registerRecipes(RegistryEvent.Register<IRecipe> event) {
+        if (hooks.CraftTweakerLoaded) {
+            CrafttweakerIntegration.finishRegistryRegistration();
+        }
         if (!MekanismConfig.current().mekce.BinRecipeClosed.val()) {
             event.getRegistry().register(new BinRecipe());
         }
         MekanismRecipe.addRecipes();
         GasConversionHandler.addDefaultGasMappings();
+    }
+
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void removeNuclearCraftShieldingRecipes(RegistryEvent.Register<IRecipe> event) {
+        if (!hooks.NuclearCraft) {
+            return;
+        }
+        if (!(event.getRegistry() instanceof IForgeRegistryModifiable)) {
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        IForgeRegistryModifiable<IRecipe> recipeRegistry = (IForgeRegistryModifiable<IRecipe>) event.getRegistry();
+        int removed = removeNuclearCraftShieldingRecipes(recipeRegistry);
+        if (removed > 0) {
+            logger.info("Removed {} NC shielding recipes for Mek armor during recipe registration.", removed);
+        }
+    }
+
+    private static final String NC_SHIELDING_RECIPE_CLASS = "nc.recipe.vanilla.recipe.ShapelessArmorRadShieldingRecipe";
+    private static final String NC_MOD_ID = "nuclearcraft";
+    private static final String NC_RAD_SHIELDING_ITEM = "rad_shielding";
+
+    private static int removeNuclearCraftShieldingRecipes(IForgeRegistryModifiable<IRecipe> recipeRegistry) {
+        List<ResourceLocation> toRemove = new ArrayList<>();
+        for (IRecipe recipe : recipeRegistry.getValuesCollection()) {
+            if (isNuclearCraftShieldingRecipeForBlockedMekArmor(recipe)) {
+                ResourceLocation recipeName = recipe.getRegistryName();
+                if (recipeName != null) {
+                    toRemove.add(recipeName);
+                }
+            }
+        }
+        for (ResourceLocation recipeName : toRemove) {
+            recipeRegistry.remove(recipeName);
+        }
+        return toRemove.size();
+    }
+
+    private static boolean isNuclearCraftShieldingRecipeForBlockedMekArmor(IRecipe recipe) {
+        if (recipe == null) {
+            return false;
+        }
+        ItemStack output = recipe.getRecipeOutput();
+        if (output.isEmpty() || !isMekArmorBlockedForNCShielding(output.getItem())) {
+            return false;
+        }
+        if (NC_SHIELDING_RECIPE_CLASS.equals(recipe.getClass().getName())) {
+            return true;
+        }
+        ResourceLocation recipeName = recipe.getRegistryName();
+        if (recipeName == null || !NC_MOD_ID.equals(recipeName.getNamespace())) {
+            return false;
+        }
+        return containsNuclearCraftRadShieldingIngredient(recipe) || recipe.getClass().getName().contains("RadShielding");
+    }
+
+    private static boolean containsNuclearCraftRadShieldingIngredient(IRecipe recipe) {
+        for (Ingredient ingredient : recipe.getIngredients()) {
+            if (ingredient == null || ingredient == Ingredient.EMPTY) {
+                continue;
+            }
+            for (ItemStack stack : ingredient.getMatchingStacks()) {
+                if (stack.isEmpty()) {
+                    continue;
+                }
+                ResourceLocation itemName = stack.getItem().getRegistryName();
+                if (itemName != null && NC_MOD_ID.equals(itemName.getNamespace()) && NC_RAD_SHIELDING_ITEM.equals(itemName.getPath())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isMekArmorBlockedForNCShielding(Item item) {
+        return item == MekanismItems.HAZMAT_MASK || item == MekanismItems.HAZMAT_GOWN || item == MekanismItems.HAZMAT_PANTS || item == MekanismItems.HAZMAT_BOOTS ||
+                item == MekanismItems.MEKASUIT_HELMET || item == MekanismItems.MEKASUIT_BODYARMOR || item == MekanismItems.MEKASUIT_PANTS || item == MekanismItems.MEKASUIT_BOOTS;
     }
 
 
@@ -321,7 +427,7 @@ public class Mekanism {
         registerTileEntity(TileEntityEnergizedSmelter.class, "energized_smelter");
         registerTileEntity(TileEntityEnergyCube.class, "energy_cube");
         registerTileEntity(TileEntityEnrichmentChamber.class, "enrichment_chamber");
-        registerTileEntity(TileEntityFactory.class, "smelting_factory");
+        registerTileEntity(TileEntityBasicFactory.class, "smelting_factory");
         registerTileEntity(TileEntityFluidTank.class, "fluid_tank");
         registerTileEntity(TileEntityFluidicPlenisher.class, "fluidic_plenisher");
         registerTileEntity(TileEntityFormulaicAssemblicator.class, "formulaic_assemblicator");
@@ -372,10 +478,11 @@ public class Mekanism {
         registerTileEntity(TileEntityUltimateFactory.class, "elite_smelting_factory");
         //Because it was registered as a ultimate_smelting_factory by the original elite factory
         //So the ultimate factory here is registered as elite_smelting_factory
-        registerTileEntity(TileEntityCreativeFactory.class, "creative_smelting_factory");
         registerTileEntity(TileEntityIsotopicCentrifuge.class, "isotopic_centrifuge");
         registerTileEntity(TileEntityNutritionalLiquifier.class, "nutritional_liquifier");
         registerTileEntity(TileEntitySuperchargedCoil.class, "supercharged_coil");
+        registerTileEntity(TileEntitySPSCasing.class, "sps_casing");
+        registerTileEntity(TileEntitySPSPort.class, "sps_port");
         registerTileEntity(TileEntityOrganicFarm.class, "organic_farm");
         registerTileEntity(TileEntityAntiprotonicNucleosynthesizer.class, "antiprotonic_nucleosynthesizer");
         registerTileEntity(TileEntityStamping.class, "stamping");
@@ -392,6 +499,12 @@ public class Mekanism {
         registerTileEntity(TileEntityModificationStation.class, "Modification_Station");
         registerTileEntity(TileEntityRadioactiveWasteBarrel.class, "radioactive_waste_barrel");
         registerTileEntity(TileEntitySPS.class, "sps");
+        registerTileEntity(TileEntityDimensionalStabilizer.class, "dimensional_stabilizer");
+        registerTileEntity(TileEntityQIODriveArray.class, "qio_drive_array");
+        registerTileEntity(TileEntityQIODashboard.class, "qio_dashboard");
+        registerTileEntity(TileEntityQIOImporter.class, "qio_importer");
+        registerTileEntity(TileEntityQIOExporter.class, "qio_exporter");
+        registerTileEntity(TileEntityQIORedstoneAdapter.class, "qio_redstone_adapter");
         /**
          * End of adding machine
          */
@@ -420,18 +533,23 @@ public class Mekanism {
         playerState.clear(false);
         activeVibrators.clear();
         worldTickHandler.resetRegenChunks();
-        privateTeleporters.clear();
-        privateEntangloporters.clear();
-
         //Reset consistent managers
-        MultiblockManager.reset();
+        MultiblockManager.saveAll();
+        SynchronizedBoilerData.hotMap.clear();
         FrequencyManager.reset();
         TransporterManager.reset();
         PathfinderCache.reset();
         TransmitterNetworkRegistry.reset();
-     //   ModuleHelper.get().resetSupportedContainers();
+        //   ModuleHelper.get().resetSupportedContainers();
 
+        QIOStorageManager.shutdown();
+    }
+
+    @EventHandler
+    public void serverStopped(FMLServerStoppedEvent event) {
+        // WorldSavedData still reads the manager during the final world save after stopping.
         RadiationManager.INSTANCE.reset();
+        MultiblockManager.shutdown();
     }
 
     @EventHandler
@@ -440,7 +558,25 @@ public class Mekanism {
     }
 
     @EventHandler
+    public void loadComplete(FMLLoadCompleteEvent event) {
+        if (!hooks.NuclearCraft) {
+            return;
+        }
+        if (!(ForgeRegistries.RECIPES instanceof IForgeRegistryModifiable)) {
+            return;
+        }
+        @SuppressWarnings("unchecked")
+        IForgeRegistryModifiable<IRecipe> recipeRegistry = (IForgeRegistryModifiable<IRecipe>) ForgeRegistries.RECIPES;
+        int removed = removeNuclearCraftShieldingRecipes(recipeRegistry);
+        if (removed > 0) {
+            logger.info("Removed {} NC shielding recipes for Mek armor during load complete.", removed);
+        }
+    }
+
+    @EventHandler
     public void preInit(FMLPreInitializationEvent event) {
+        MekanismCriteriaTriggers.init();
+
         //sanity check the api location if not deobf
         if (!((Boolean) Launch.blackboard.get("fml.deobfuscatedEnvironment"))) {
             String apiLocation = MekanismAPI.class.getProtectionDomain().getCodeSource().getLocation().toString();
@@ -456,6 +592,7 @@ public class Mekanism {
         configurationtools = new Configuration(new File("config/mekanism/MekanismTools.cfg"));
         configurationMultiblockMachine = new Configuration(new File("config/mekanism/MekanismMultiblockMachine.cfg"));
         configurationMeka = new Configuration(new File("config/mekanism/MekaSuitArmor.cfg"));
+        getQIOProcessingConfiguration();
 
 
         //Load configuration
@@ -466,7 +603,7 @@ public class Mekanism {
         MinecraftForge.EVENT_BUS.register(MekanismItems.GasMask);
         MinecraftForge.EVENT_BUS.register(MekanismItems.FreeRunners);
 
-        if (Loader.isModLoaded("mcmultipart")) {
+        if (MekanismHooks.Mods.MCMP.isPresent()) {
             //Set up multiparts
             new MultipartMekanism();
         } else {
@@ -483,8 +620,13 @@ public class Mekanism {
         InfuseRegistry.registerInfuseType(new InfuseType("BIO", new ResourceLocation(Mekanism.MODID, "blocks/infuse/Bio")).setTranslationKey("bio"));
         InfuseRegistry.registerInfuseType(new InfuseType("OBSIDIAN", new ResourceLocation(Mekanism.MODID, "blocks/infuse/Obsidian")).setTranslationKey("obsidian"));
 
+        MekanismMachineRecipeProviders.register();
+
         Capabilities.registerCapabilities();
         hooks.hookPreInit();
+        if (hooks.CraftTweakerLoaded) {
+            CrafttweakerIntegration.loadRegistryScripts();
+        }
         MinecraftForge.EVENT_BUS.register(Mekanism.EXECUTE_MANAGER);
         Mekanism.EXECUTE_MANAGER.init();
         Mekanism.logger.info(String.format("Parallel executor is ready (%s Threads), Let's get started!!!", TaskExecutor.THREAD_COUNT));
@@ -508,7 +650,7 @@ public class Mekanism {
         MinecraftForge.EVENT_BUS.register(RadiationManager.INSTANCE);
 
         //Initialization notification
-        logger.info("Version " + versionNumber + " initializing...");
+        logger.info("Version " + Tags.VERSION + " initializing...");
 
         //Register with ForgeChunkManager
         ForgeChunkManager.setForcedChunkLoadingCallback(this, new ChunkManager());
@@ -536,7 +678,9 @@ public class Mekanism {
                 if (biome.getSpawnableList(EnumCreatureType.MONSTER) != null && !biome.getSpawnableList(EnumCreatureType.MONSTER).isEmpty()) {
                     EntityRegistry.addSpawn(EntityBabySkeleton.class, 40, 1, 3, EnumCreatureType.MONSTER, biome);
                     EntityRegistry.addSpawn(EntityBabyCreeper.class, 40, 1, 3, EnumCreatureType.MONSTER, biome);
-                    EntityRegistry.addSpawn(EntityBabyEnderman.class, 5, 1, 3, EnumCreatureType.MONSTER, biome);
+                    if (!(biome instanceof BiomeEnd) && !(biome instanceof BiomeHell)) {
+                        EntityRegistry.addSpawn(EntityBabyEnderman.class, 5, 1, 3, EnumCreatureType.MONSTER, biome);
+                    }
                 }
             });
             ForgeRegistries.BIOMES.forEach(biome -> {
@@ -586,7 +730,7 @@ public class Mekanism {
     }
 
     private void imcQueue() {
-        Item[] addModulesToAll = {MekanismItems.MEKASUIT_HELMET, MekanismItems.MEKASUIT_BODYARMOR, MekanismItems.MEKASUIT_PANTS, MekanismItems.MEKASUIT_BOOTS, MekanismItems.MEKA_TOOL};
+        Item[] addModulesToAll = {MekanismItems.MEKASUIT_HELMET, MekanismItems.MEKASUIT_BODYARMOR, MekanismItems.MEKASUIT_PANTS, MekanismItems.MEKASUIT_BOOTS, MekanismItems.MEKA_TOOL, MekanismItems.MEKA_FISHING_ROD};
         Item[] addMekaSuitModules = new Item[]{MekanismItems.MEKASUIT_HELMET, MekanismItems.MEKASUIT_BODYARMOR, MekanismItems.MEKASUIT_PANTS, MekanismItems.MEKASUIT_BOOTS};
 
         for (Item stack : addModulesToAll) {
@@ -595,11 +739,14 @@ public class Mekanism {
 
 
         for (Item stack : addMekaSuitModules) {
-            ModuleHelper.get().setSupported(stack, /*MekanismModules.COLOR_MODULATION_UNIT,*/ MekanismModules.LASER_DISSIPATION_UNIT, MekanismModules.RADIATION_SHIELDING_UNIT);
+            ModuleHelper.get().setSupported(stack, MekanismModules.COLOR_MODULATION_UNIT, MekanismModules.LASER_DISSIPATION_UNIT, MekanismModules.RADIATION_SHIELDING_UNIT);
         }
 
 
         ModuleHelper.get().setSupported(MekanismItems.MEKA_TOOL, MekanismModules.ATTACK_AMPLIFICATION_UNIT, MekanismModules.SILK_TOUCH_UNIT, MekanismModules.FORTUNE_UNIT, MekanismModules.BLASTING_UNIT, MekanismModules.VEIN_MINING_UNIT, MekanismModules.FARMING_UNIT, MekanismModules.SHEARING_UNIT, MekanismModules.TELEPORTATION_UNIT, MekanismModules.EXCAVATION_ESCALATION_UNIT);
+        if (Mekanism.hooks.FarmersDelightLegacyLoaded) {
+            ModuleHelper.get().setSupported(MekanismItems.MEKA_TOOL, MekanismModules.LASER_CUTTER_UNIT);
+        }
 
         ModuleHelper.get().setSupported(MekanismItems.MEKASUIT_HELMET, MekanismModules.ELECTROLYTIC_BREATHING_UNIT, MekanismModules.INHALATION_PURIFICATION_UNIT, MekanismModules.VISION_ENHANCEMENT_UNIT, MekanismModules.NUTRITIONAL_INJECTION_UNIT);
 
@@ -612,6 +759,8 @@ public class Mekanism {
         ModuleHelper.get().setSupported(MekanismItems.MEKASUIT_PANTS, MekanismModules.LOCOMOTIVE_BOOSTING_UNIT, MekanismModules.GYROSCOPIC_STABILIZATION_UNIT, MekanismModules.HYDROSTATIC_REPULSOR_UNIT, MekanismModules.MOTORIZED_SERVO_UNIT);
 
         ModuleHelper.get().setSupported(MekanismItems.MEKASUIT_BOOTS, MekanismModules.HYDRAULIC_PROPULSION_UNIT, MekanismModules.MAGNETIC_ATTRACTION_UNIT, MekanismModules.FROST_WALKER_UNIT);
+
+        ModuleHelper.get().setSupported(MekanismItems.MEKA_FISHING_ROD, MekanismModules.FISHING_COLLECTING_UNIT, MekanismModules.FISHING_SPEED_UNIT, MekanismModules.FISHING_INTELLIGENT_UNIT, MekanismModules.FISHING_MULTIPLE_UNIT);
     }
 
 
@@ -627,7 +776,9 @@ public class Mekanism {
         });
         ModuleHelper.get().processSupportedContainers();
         hooks.hookPostInit();
-        MekanismRecipe.SuperFumoReciperRegister();
+        if (MekanismConfig.current().mekce.EnableSuperFumoRecipe.val()) {
+            MekanismRecipe.SuperFumoReciperRegister();
+        }
         MinecraftForge.EVENT_BUS.post(new BoxBlacklistEvent());
         Mekanism.proxy.postInit();
         logger.info("Hooking complete.");
@@ -780,10 +931,24 @@ public class Mekanism {
     @SubscribeEvent
     public void onWorldLoad(WorldEvent.Load event) {
         playerState.init(event.getWorld());
+        if (!event.getWorld().isRemote) {
+            QIOStorageManager.load(event.getWorld());
+        }
+    }
+
+    @SubscribeEvent
+    public void onWorldSave(WorldEvent.Save event) {
+        if (!event.getWorld().isRemote) MultiblockManager.save(event.getWorld());
+        if (!event.getWorld().isRemote && event.getWorld().provider.getDimension() == 0) {
+            QIOStorageManager.flush();
+        }
     }
 
     @SubscribeEvent
     public void onWorldUnload(WorldEvent.Unload event) {
+        if (!event.getWorld().isRemote) {
+            MultiblockManager.unload(event.getWorld());
+        }
         // Make sure the global fake player drops its reference to the World
         // when the server shuts down
         if (event.getWorld() instanceof WorldServer) {

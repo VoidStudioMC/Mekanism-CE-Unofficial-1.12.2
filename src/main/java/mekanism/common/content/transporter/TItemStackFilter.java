@@ -3,16 +3,21 @@ package mekanism.common.content.transporter;
 import io.netty.buffer.ByteBuf;
 import mekanism.api.TileNetworkList;
 import mekanism.common.content.filter.IItemStackFilter;
-import mekanism.common.content.transporter.Finder.ItemStackFinder;
+import mekanism.common.lib.inventory.Finder;
+import mekanism.common.lib.inventory.TransitRequest;
 import mekanism.common.util.MekanismUtils;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
+import net.minecraft.util.EnumFacing;
 import net.minecraftforge.items.ItemHandlerHelper;
 
 import javax.annotation.Nonnull;
 
 public class TItemStackFilter extends TransporterFilter implements IItemStackFilter {
+
+    private static final int MAX_TRANSFER_SIZE = 64;
 
     public boolean sizeMode;
 
@@ -29,16 +34,16 @@ public class TItemStackFilter extends TransporterFilter implements IItemStackFil
     }
 
     @Override
-    public InvStack getStackFromInventory(StackSearcher searcher, boolean singleItem) {
+    public TransitRequest mapInventory(TileEntity tile, EnumFacing side, boolean singleItem) {
         if (sizeMode && !singleItem) {
-            return searcher.takeDefinedItem(itemType, min, max);
+            return TransitRequest.definedItem(tile, side, min, max, getFinder());
         }
-        return super.getStackFromInventory(searcher, singleItem);
+        return super.mapInventory(tile, side, singleItem);
     }
 
     @Override
     public Finder getFinder() {
-        return new ItemStackFinder(itemType);
+        return Finder.wildcard(itemType);
     }
 
     @Override
@@ -55,9 +60,11 @@ public class TItemStackFilter extends TransporterFilter implements IItemStackFil
     protected void read(NBTTagCompound nbtTags) {
         super.read(nbtTags);
         sizeMode = nbtTags.getBoolean("sizeMode");
-        min = nbtTags.getInteger("min");
-        max = nbtTags.getInteger("max");
+        setTransferRange(nbtTags.getInteger("min"), nbtTags.getInteger("max"));
         itemType = new ItemStack(nbtTags);
+        if (!itemType.isEmpty()) {
+            itemType.setCount(Math.max(1, Math.min(MAX_TRANSFER_SIZE, itemType.getCount())));
+        }
     }
 
     @Override
@@ -79,9 +86,16 @@ public class TItemStackFilter extends TransporterFilter implements IItemStackFil
     protected void read(ByteBuf dataStream) {
         super.read(dataStream);
         sizeMode = dataStream.readBoolean();
-        min = dataStream.readInt();
-        max = dataStream.readInt();
-        itemType = new ItemStack(Item.getItemById(dataStream.readInt()), dataStream.readInt(), dataStream.readInt());
+        setTransferRange(dataStream.readInt(), dataStream.readInt());
+        Item item = Item.getItemById(dataStream.readInt());
+        int count = Math.max(1, Math.min(MAX_TRANSFER_SIZE, dataStream.readInt()));
+        int damage = dataStream.readInt();
+        itemType = item == null ? ItemStack.EMPTY : new ItemStack(item, count, damage);
+    }
+
+    private void setTransferRange(int requestedMin, int requestedMax) {
+        min = Math.max(0, Math.min(MAX_TRANSFER_SIZE, requestedMin));
+        max = Math.max(min, Math.min(MAX_TRANSFER_SIZE, requestedMax));
     }
 
     @Override
@@ -106,8 +120,7 @@ public class TItemStackFilter extends TransporterFilter implements IItemStackFil
     @Override
     public TItemStackFilter clone() {
         TItemStackFilter filter = new TItemStackFilter();
-        filter.allowDefault = allowDefault;
-        filter.color = color;
+        copyBaseData(filter);
         filter.itemType = itemType.copy();
         filter.sizeMode = sizeMode;
         filter.min = min;
@@ -123,6 +136,9 @@ public class TItemStackFilter extends TransporterFilter implements IItemStackFil
 
     @Override
     public void setItemStack(@Nonnull ItemStack stack) {
-        itemType = stack;
+        itemType = stack.copy();
+        if (!itemType.isEmpty()) {
+            itemType.setCount(Math.max(1, Math.min(MAX_TRANSFER_SIZE, itemType.getCount())));
+        }
     }
 }

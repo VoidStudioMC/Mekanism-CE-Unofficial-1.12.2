@@ -1,20 +1,22 @@
 package mekanism.common.block;
 
 import mekanism.api.IMekWrench;
-import mekanism.api.gas.IGasItem;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismBlocks;
+import mekanism.common.base.IRedstoneControl;
 import mekanism.common.base.ISideConfiguration;
 import mekanism.common.base.ISustainedInventory;
 import mekanism.common.base.ITierItem;
 import mekanism.common.block.states.BlockStateFacing;
 import mekanism.common.block.states.BlockStateGasTank;
 import mekanism.common.integration.wrenches.Wrenches;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.security.ISecurityItem;
 import mekanism.common.security.ISecurityTile;
 import mekanism.common.tile.TileEntityGasTank;
 import mekanism.common.tile.prefab.TileEntityBasicBlock;
 import mekanism.common.util.ItemDataUtils;
+import mekanism.common.util.MekanismPlacementData;
 import mekanism.common.util.MekanismUtils;
 import mekanism.common.util.SecurityUtils;
 import net.minecraft.block.Block;
@@ -85,15 +87,18 @@ public class BlockGasTank extends BlockMekanismContainer {
     public void onBlockPlacedBy(World world, BlockPos pos, IBlockState state, EntityLivingBase placer, ItemStack stack) {
         TileEntityBasicBlock tileEntity = (TileEntityBasicBlock) world.getTileEntity(pos);
         EnumFacing change = EnumFacing.SOUTH;
-        int side = MathHelper.floor((double) (placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
-        switch (side) {
-            case 0 -> change = EnumFacing.NORTH;
-            case 1 -> change = EnumFacing.EAST;
-            case 2 -> change = EnumFacing.SOUTH;
-            case 3 -> change = EnumFacing.WEST;
+        if (placer != null) {
+            int side = MathHelper.floor((double) (placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
+            switch (side) {
+                case 0 -> change = EnumFacing.NORTH;
+                case 1 -> change = EnumFacing.EAST;
+                case 2 -> change = EnumFacing.SOUTH;
+                case 3 -> change = EnumFacing.WEST;
+            }
         }
         tileEntity.setFacing(change);
         tileEntity.redstone = world.getRedstonePowerFromNeighbors(pos) > 0;
+        MekanismPlacementData.apply(world, pos, placer, stack);
     }
 
     @Override
@@ -186,7 +191,7 @@ public class BlockGasTank extends BlockMekanismContainer {
     protected ItemStack getDropItem(@Nonnull IBlockState state, @Nonnull IBlockAccess world, @Nonnull BlockPos pos) {
         TileEntityGasTank tileEntity = (TileEntityGasTank) world.getTileEntity(pos);
         ItemStack itemStack = new ItemStack(MekanismBlocks.GasTank);
-        if (itemStack.hasTagCompound()) {
+        if (!itemStack.hasTagCompound()) {
             itemStack.setTagCompound(new NBTTagCompound());
         }
         if (tileEntity != null) {
@@ -197,12 +202,11 @@ public class BlockGasTank extends BlockMekanismContainer {
             }
             ((ISideConfiguration) tileEntity).getConfig().write(ItemDataUtils.getDataMap(itemStack));
             ((ISideConfiguration) tileEntity).getEjector().write(ItemDataUtils.getDataMap(itemStack));
+            ItemDataUtils.setInt(itemStack, "controlType", ((IRedstoneControl) tileEntity).getControlType().ordinal());
         }
         ITierItem tierItem = (ITierItem) itemStack.getItem();
         tierItem.setBaseTier(itemStack, tileEntity.tier.getBaseTier());
-
-        IGasItem storageTank = (IGasItem) itemStack.getItem();
-        storageTank.setGas(itemStack, tileEntity.gasTank.getGas());
+        GasInventorySlot.setGasContained(itemStack, tileEntity.gasTank.getGas());
 
         ISustainedInventory inventory = (ISustainedInventory) itemStack.getItem();
         inventory.setInventory(tileEntity.getInventory(), itemStack);
@@ -219,7 +223,7 @@ public class BlockGasTank extends BlockMekanismContainer {
     @Deprecated
     public int getComparatorInputOverride(IBlockState state, World world, BlockPos pos) {
         TileEntityGasTank tileEntity = (TileEntityGasTank) world.getTileEntity(pos);
-        return tileEntity.getRedstoneLevel();
+        return tileEntity.supportsComparator() ? tileEntity.getCurrentRedstoneLevel() : 0;
     }
 
     @Override

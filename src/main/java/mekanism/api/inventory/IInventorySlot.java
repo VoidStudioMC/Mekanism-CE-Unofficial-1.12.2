@@ -2,7 +2,10 @@ package mekanism.api.inventory;
 
 import mcp.MethodsReturnNonnullByDefault;
 import mekanism.api.Action;
+import mekanism.api.AutomationType;
 import mekanism.api.IContentsListener;
+import mekanism.api.NBTConstants;
+import mekanism.api.qio.resource.QIOResourceDescriptor;
 import net.minecraft.inventory.IInventory;
 import net.minecraft.inventory.Slot;
 import net.minecraft.item.ItemStack;
@@ -62,13 +65,13 @@ public interface IInventorySlot extends INBTSerializable<NBTTagCompound>, IConte
      * #onContentsChanged()}. It is also recommended to override this if your internal {@link ItemStack} is mutable so that a copy does not have to be made every run
      */
     default ItemStack insertItem(ItemStack stack, Action action, AutomationType automationType) {
-        if (stack.isEmpty() || !isItemValid(stack)) {
-            //"Fail quick" if the given stack is empty, or we can never insert the item or currently are unable to insert it
-            return stack;
+        if (stack.isEmpty()) {
+            //"Fail quick" if the given stack is empty
+            return ItemStack.EMPTY;
         }
         int needed = getLimit(stack) - getCount();
-        if (needed <= 0) {
-            //Fail if we are a full slot
+        if (needed <= 0 || !isItemValid(stack)) {
+            //Fail if we are a full slot, or we can never insert the item or currently are unable to insert it
             return stack;
         }
         boolean sameType = false;
@@ -94,6 +97,46 @@ public interface IInventorySlot extends INBTSerializable<NBTTagCompound>, IConte
         }
         //If we didn't accept this item, then just return the given stack
         return stack;
+    }
+
+    /**
+     * Simulates or performs insertion when only the accepted amount is needed. Implementations with a mutable
+     * backing stack should override this to avoid allocating a remainder ItemStack for every probe.
+     */
+    default int insertItemCount(ItemStack stack, Action action, AutomationType automationType) {
+        if (stack.isEmpty()) {
+            return 0;
+        }
+        ItemStack remainder = insertItem(stack, action, automationType);
+        return Math.max(0, stack.getCount() - (remainder == null ? 0 : remainder.getCount()));
+    }
+
+    /**
+     * Cheap, conservative admission hint. False guarantees no insertion is possible in the current state;
+     * true still requires checking the actual resource and insertion rules. Unknown implementations allow a probe.
+     */
+    default boolean mayHaveSpaceForInsertion() {
+        return true;
+    }
+
+    /**
+     * Physical space for a resource. templateCount preserves count-sensitive getLimit implementations.
+     * With checkInsertion, simulate offering the full remaining room, using the slot's original insertion rules.
+     * Implementations may avoid stack construction only when these same rules can be evaluated exactly.
+     */
+    default int getResourceCapacity(QIOResourceDescriptor resource, int templateCount, boolean checkInsertion,
+                                    AutomationType automationType) {
+        if (templateCount <= 0) return 0;
+        ItemStack expected = resource.resolveItemStackTemplate();
+        if (expected == null || expected.isEmpty()) return 0;
+        expected.setCount(templateCount);
+        ItemStack stored = getStack();
+        if (!stored.isEmpty() && (!ItemStack.areItemsEqual(stored, expected) ||
+                !ItemStack.areItemStackTagsEqual(stored, expected))) return 0;
+        int room = Math.max(0, getLimit(expected) - stored.getCount());
+        if (!checkInsertion || room == 0) return room;
+        expected.setCount(room);
+        return insertItemCount(expected, Action.SIMULATE, automationType);
     }
 
 
@@ -173,7 +216,9 @@ public interface IInventorySlot extends INBTSerializable<NBTTagCompound>, IConte
      * @return A slot for use in a container that represents this {@link IInventorySlot}, or null if this slot should not be added.
      */
     @Nullable
-    Slot createContainerSlot();
+    default Slot createContainerSlot() {
+        return null;
+    }
 
     /**
      * Convenience method for modifying the size of the stored stack.
@@ -226,7 +271,10 @@ public interface IInventorySlot extends INBTSerializable<NBTTagCompound>, IConte
      */
     default int growStack(int amount, Action action) {
         int current = getCount();
-        if (amount > 0) {
+        if (current == 0) {
+            //"Fail quick" if our stack is empty, so we can't grow it
+            return 0;
+        } else if (amount > 0) {
             //Cap adding amount at how much we need, so that we don't risk integer overflow
             amount = Math.min(amount, getLimit(getStack()));
         }
@@ -276,5 +324,20 @@ public interface IInventorySlot extends INBTSerializable<NBTTagCompound>, IConte
      */
     default int getCount() {
         return getStack().getCount();
+    }
+
+    @Override
+    default NBTTagCompound serializeNBT() {
+        NBTTagCompound nbt = new NBTTagCompound();
+        if (!isEmpty()) {
+            ItemStack stack = getStack();
+            NBTTagCompound itemTag = new NBTTagCompound();
+            stack.writeToNBT(itemTag);
+            nbt.setTag(NBTConstants.ITEM, itemTag);
+            if (getCount() > stack.getMaxStackSize()) {
+                nbt.setInteger(NBTConstants.SIZE_OVERRIDE, getCount());
+            }
+        }
+        return nbt;
     }
 }

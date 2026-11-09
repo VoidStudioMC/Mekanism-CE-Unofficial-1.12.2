@@ -33,6 +33,7 @@ public class GrSMekanismAdd implements GroovyPlugin {
 
     @Override
     public void onCompatLoaded(GroovyContainer<?> groovyContainer) {
+        // The event listener is registered from Mekanism preInit while its mod container is active.
     }
 
     @Override

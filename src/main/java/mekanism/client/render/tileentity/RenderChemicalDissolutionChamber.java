@@ -24,46 +24,56 @@ public class RenderChemicalDissolutionChamber extends TileEntitySpecialRenderer<
 
     private static GasRenderMap<DisplayInteger[]> cachedCenterGas = new GasRenderMap<>();
 
-    private static final int stages = 500;
+    private static final int stages = 64;
 
     private ModelChemicalDissolutionChamber model = new ModelChemicalDissolutionChamber();
 
     public static void resetDisplayInts() {
+        cachedCenterGas.values().forEach(DisplayInteger::deleteAll);
         cachedCenterGas.clear();
     }
 
     @Override
     public void render(TileEntityChemicalDissolutionChamber tileEntity, double x, double y, double z, float partialTick, int destroyStage, float alpha) {
-        if (tileEntity.outputTank.getStored() > 0) {
+        GasStack gasStack = tileEntity.outputTank.getGas();
+        if (gasStack != null && gasStack.amount > 0 && gasStack.getGas() != null) {
             GlStateManager.pushMatrix();
-            GlStateManager.enableCull();
-            GlStateManager.disableLighting();
-            GlStateManager.shadeModel(GL11.GL_SMOOTH);
-            GlStateManager.disableAlpha();
-            GlStateManager.enableBlend();
-            GlStateManager.blendFunc(GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA);
-            bindTexture(TextureMap.LOCATION_BLOCKS_TEXTURE);
-            GlStateManager.translate((float) x, (float) y, (float) z);
-            MekanismRenderer.GlowInfo glowInfo = MekanismRenderer.enableGlow();
-            DisplayInteger[] displayList = getListAndRender(tileEntity.outputTank.getGas());
-            MekanismRenderer.color(tileEntity.outputTank.getGas());
-            displayList[Math.min(stages - 1, (int) (tileEntity.prevScale * ((float) stages - 1)))].render();
-            MekanismRenderer.resetColor();
-            MekanismRenderer.disableGlow(glowInfo);
-            GlStateManager.disableBlend();
-            GlStateManager.enableAlpha();
-            GlStateManager.enableLighting();
-            GlStateManager.disableCull();
-            GlStateManager.popMatrix();
+            MekanismRenderer.GlowInfo glowInfo = null;
+            try {
+                GlStateManager.enableCull();
+                GlStateManager.disableLighting();
+                GlStateManager.shadeModel(GL11.GL_SMOOTH);
+                GlStateManager.disableAlpha();
+                GlStateManager.enableBlend();
+                GlStateManager.blendFunc(GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE_MINUS_SRC_ALPHA);
+                bindTexture(TextureMap.LOCATION_BLOCKS_TEXTURE);
+                GlStateManager.translate((float) x, (float) y, (float) z);
+                glowInfo = MekanismRenderer.enableGlow();
+                DisplayInteger[] displayList = getListAndRender(gasStack);
+                MekanismRenderer.color(gasStack);
+                int stage = Math.max(0, Math.min(stages - 1, (int) (tileEntity.prevScale * (stages - 1))));
+                displayList[stage].render();
+            } finally {
+                MekanismRenderer.resetColor();
+                if (glowInfo != null) {
+                    MekanismRenderer.disableGlow(glowInfo);
+                }
+                MekanismRenderer.resetBlockRenderState();
+                GlStateManager.popMatrix();
+            }
         }
 
         GlStateManager.pushMatrix();
-        GlStateManager.translate((float) x + 0.5F, (float) y + 1.5F, (float) z + 0.5F);
-        bindTexture(MekanismUtils.getResource(ResourceType.RENDER, "ChemicalDissolutionChamber.png"));
-        MekanismRenderer.rotate(tileEntity.facing, 0, 180, 90, 270);
-        GlStateManager.rotate(180, 0, 0, 1);
-        model.render(0.0625F,true);
-        GlStateManager.popMatrix();
+        try {
+            GlStateManager.translate((float) x + 0.5F, (float) y + 1.5F, (float) z + 0.5F);
+            bindTexture(MekanismUtils.getResource(ResourceType.RENDER, "ChemicalDissolutionChamber.png"));
+            MekanismRenderer.rotate(tileEntity.facing, 0, 180, 90, 270);
+            GlStateManager.rotate(180, 0, 0, 1);
+            model.render(0.0625F, true);
+        } finally {
+            MekanismRenderer.resetBlockRenderState();
+            GlStateManager.popMatrix();
+        }
         MekanismRenderer.machineRenderer().render(tileEntity, x, y, z, partialTick, destroyStage, alpha);
     }
 
@@ -77,20 +87,23 @@ public class RenderChemicalDissolutionChamber extends TileEntitySpecialRenderer<
         toReturn.baseBlock = Blocks.WATER;
         toReturn.setTexture(gasStack.getGas().getSprite());
         DisplayInteger[] displays = new DisplayInteger[stages];
-        cachedCenterGas.put(gasStack, displays);
 
         for (int i = 0; i < stages; i++) {
             displays[i] = DisplayInteger.createAndStart();
-            toReturn.minZ = 0.125 + .01;
-            toReturn.maxZ = 0.875 - .01;
-            toReturn.minX = 0.125 + .01;
-            toReturn.maxX = 0.875 - .01;
-            toReturn.minY = 0.4375 + .01;
-            toReturn.maxY = 0.4375 + ((float) i / stages) * 0.3125 - .01;
+            try {
+                toReturn.minZ = 0.125 + .01;
+                toReturn.maxZ = 0.875 - .01;
+                toReturn.minX = 0.125 + .01;
+                toReturn.maxX = 0.875 - .01;
+                toReturn.minY = 0.4375 + .01;
+                toReturn.maxY = 0.4375 + ((float) i / stages) * 0.3125 - .01;
 
-            MekanismRenderer.renderObject(toReturn);
-            DisplayInteger.endList();
+                MekanismRenderer.renderObject(toReturn);
+            } finally {
+                DisplayInteger.endList();
+            }
         }
+        cachedCenterGas.put(gasStack, displays);
         return displays;
     }
 }

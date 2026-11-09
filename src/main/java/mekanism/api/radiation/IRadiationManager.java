@@ -4,8 +4,7 @@ import com.google.common.collect.Table;
 import mcp.MethodsReturnNonnullByDefault;
 import mekanism.api.Chunk3D;
 import mekanism.api.Coord4D;
-import mekanism.api.gas.GasStack;
-import mekanism.api.gas.GasTankInfo;
+import mekanism.api.gas.*;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.util.DamageSource;
@@ -13,6 +12,10 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.world.World;
 
 import javax.annotation.ParametersAreNonnullByDefault;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
 /**
  * The RadiationManager handles radiation across all in-game dimensions. Radiation exposure levels are provided in _sieverts, defining a rate of accumulation of
@@ -43,9 +46,40 @@ import javax.annotation.ParametersAreNonnullByDefault;
 public interface IRadiationManager {
 
     /**
+     * Explicit world identity. Unavailable environmental queries return NaN, never baseline.
+     */
+    double getRadiationLevel(World world, BlockPos pos);
+
+    boolean radiate(World world, BlockPos pos, double magnitude);
+
+    boolean dumpRadiation(World world, BlockPos pos, GasStack stack);
+
+    List<IRadiationSource> getRadiationSources(World world);
+
+    List<IRadiationSource> getRadiationSources(World world, int chunkX, int chunkZ);
+
+    void removeRadiationSource(World world, BlockPos pos);
+
+    void removeRadiationSources(World world, int chunkX, int chunkZ);
+
+    /**
      * Helper to expose the ability to check if Mekanism's radiation system is enabled in the config.
      */
     boolean isRadiationEnabled();
+
+    /**
+     * Gets the baseline environmental radiation level.
+     */
+    default double baselineRadiation() {
+        return 0.0000001D;
+    }
+
+    /**
+     * Gets the minimum radiation magnitude that has a noticeable effect.
+     */
+    default double minRadiationMagnitude() {
+        return 0.00001D;
+    }
 
     /**
      * Helper to access Mekanism's internal radiation damage source.
@@ -72,11 +106,20 @@ public interface IRadiationManager {
     double getRadiationLevel(Entity entity);
 
     /**
-     * Gets an unmodifiable table of the radiation sources tracked by this manager. This table keeps track of radiation sources on both a chunk and position based level.
+     * Legacy dimension-keyed snapshot of loaded worlds. Same-dimension plugin worlds cannot be represented
+     * distinctly here; use the explicit World APIs for those. Entries are detached from authoritative data.
      *
      * @return Unmodifiable table of radiation sources.
      */
     Table<Chunk3D, Coord4D, IRadiationSource> getRadiationSources();
+
+    /**
+     * Gets a snapshot of sources centered in the given chunk.
+     */
+    default List<IRadiationSource> getRadiationSources(Chunk3D chunk) {
+        Map<Coord4D, IRadiationSource> sources = getRadiationSources().row(chunk);
+        return sources.isEmpty() ? Collections.emptyList() : new ArrayList<>(sources.values());
+    }
 
     /**
      * Removes all radiation sources in a given chunk.
@@ -110,27 +153,102 @@ public interface IRadiationManager {
     void radiate(EntityLivingBase entity, double magnitude);
 
     /**
-     * Helper to "dump" any radioactive gases stored in the given gas tanks.
+     * Legacy compat helper to "dump" any radioactive gases stored in the given gas tanks.
+     * Prefer {@link #dumpRadiation(Coord4D, IGasHandler, boolean)} so callers stay on handler/tank APIs.
      *
      * @param coord            Location to dump radiation at.
      * @param gasTanks         Tanks to process.
      * @param clearRadioactive {@code true} to clear any gas tanks that have radioactive substances.
      */
+    @Deprecated
     void dumpRadiation(Coord4D coord, GasTankInfo[] gasTanks, boolean clearRadioactive);
+
+    /**
+     * Helper to "dump" any radioactive gases stored in the given gas handler.
+     *
+     * @param coord            Location to dump radiation at.
+     * @param gasHandler       Gas handler to process.
+     * @param clearRadioactive {@code true} to clear any gas tanks that have radioactive substances.
+     */
+    default void dumpRadiation(Coord4D coord, IGasHandler gasHandler, boolean clearRadioactive) {
+        if (gasHandler instanceof IMekanismGasHandler mekanismGasHandler) {
+            for (int tank = 0, tanks = mekanismGasHandler.getCountGasTanks(null); tank < tanks; tank++) {
+                GasStack gasStack = mekanismGasHandler.getGasInTank(tank, null);
+                if (gasStack != null && dumpRadiation(coord, gasStack) && clearRadioactive) {
+                    mekanismGasHandler.setGasInTank(tank, null, null);
+                }
+            }
+        } else if (gasHandler instanceof IExtendedGasHandler extendedGasHandler) {
+            for (int tank = 0, tanks = extendedGasHandler.getCountGasTanks(); tank < tanks; tank++) {
+                GasStack gasStack = extendedGasHandler.getGasInTank(tank);
+                if (gasStack != null && dumpRadiation(coord, gasStack) && clearRadioactive) {
+                    extendedGasHandler.setGasInTank(tank, null);
+                }
+            }
+        } else if (gasHandler != null) {
+            if (clearRadioactive) {
+                // Plain IGasHandler still needs the legacy tank info bridge for mutable clear semantics.
+                dumpRadiation(coord, gasHandler.getTankInfo(), true);
+            } else {
+                for (int tank = 0, tanks = gasHandler.getLegacyTankCount(); tank < tanks; tank++) {
+                    GasStack gasStack = gasHandler.getLegacyGasInTank(tank);
+                    if (gasStack != null) {
+                        dumpRadiation(coord, gasStack);
+                    }
+                }
+            }
+        }
+    }
+
+    default void dumpRadiation(World world, BlockPos pos, IGasHandler gasHandler, boolean clearRadioactive) {
+        if (gasHandler instanceof IMekanismGasHandler mekanismGasHandler) {
+            for (int tank = 0, tanks = mekanismGasHandler.getCountGasTanks(null); tank < tanks; tank++) {
+                GasStack gasStack = mekanismGasHandler.getGasInTank(tank, null);
+                if (gasStack != null && dumpRadiation(world, pos, gasStack) && clearRadioactive) {
+                    mekanismGasHandler.setGasInTank(tank, null, null);
+                }
+            }
+        } else if (gasHandler instanceof IExtendedGasHandler extendedGasHandler) {
+            for (int tank = 0, tanks = extendedGasHandler.getCountGasTanks(); tank < tanks; tank++) {
+                GasStack gasStack = extendedGasHandler.getGasInTank(tank);
+                if (gasStack != null && dumpRadiation(world, pos, gasStack) && clearRadioactive) {
+                    extendedGasHandler.setGasInTank(tank, null);
+                }
+            }
+        } else if (gasHandler != null) {
+            if (clearRadioactive) {
+                // Plain IGasHandler still needs the legacy tank info bridge for mutable clear semantics.
+                for (GasTankInfo info : gasHandler.getTankInfo()) {
+                    if (info instanceof IExtendedGasTank) {
+                        IExtendedGasTank tank = (IExtendedGasTank) info;
+                        if (dumpRadiation(world, pos, tank.getGas())) tank.setEmpty();
+                    } else if (info instanceof GasTank) {
+                        GasTank tank = (GasTank) info;
+                        if (dumpRadiation(world, pos, tank.getGas())) tank.setGas(null);
+                    }
+                }
+            } else {
+                for (int tank = 0, tanks = gasHandler.getLegacyTankCount(); tank < tanks; tank++) {
+                    GasStack gasStack = gasHandler.getLegacyGasInTank(tank);
+                    if (gasStack != null) {
+                        dumpRadiation(world, pos, gasStack);
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * Checks if the given {@link GasStack} is radioactive and if it is dumps a proportionate amount of radiation at the given location.
      *
      * @param coord Location to dump radiation at.
      * @param stack Stack to check.
-     *
      * @return {@code true} if the stack was radioactive and radiation got dumped.
-     *
-     * @apiNote If radiation is disabled this may still return {@code true}.
+     * @apiNote If radiation is disabled this should return {@code false} so callers that clear radioactive contents do not silently void them.
      */
     boolean dumpRadiation(Coord4D coord, GasStack stack);
 
-    default void dumpRadiation(BlockPos pos, World world, GasStack stack){
-        dumpRadiation(new Coord4D(pos,world),stack);
+    default void dumpRadiation(BlockPos pos, World world, GasStack stack) {
+        dumpRadiation(world, pos, stack);
     }
 }

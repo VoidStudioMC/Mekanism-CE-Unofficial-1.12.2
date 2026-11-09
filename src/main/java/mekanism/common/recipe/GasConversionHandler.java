@@ -3,9 +3,9 @@ package mekanism.common.recipe;
 import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
 import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.GasTank;
-import mekanism.api.gas.IGasItem;
+import mekanism.api.gas.IExtendedGasTank;
 import mekanism.common.MekanismFluids;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.recipe.ingredients.IMekanismIngredient;
 import mekanism.common.recipe.ingredients.ItemStackMekIngredient;
 import mekanism.common.recipe.ingredients.OredictMekIngredient;
@@ -90,7 +90,7 @@ public class GasConversionHandler {
      * Gets an item gas checking if it will be valid for a specific tank and if the type is also valid.
      */
     @Nullable
-    public static GasStack getItemGas(ItemStack itemStack, GasTank gasTank, Predicate<Gas> isValidGas) {
+    public static GasStack getItemGas(ItemStack itemStack, IExtendedGasTank gasTank, Predicate<Gas> isValidGas) {
         return getItemGas(itemStack, gasTank.getNeeded(), (gas, quantity) -> {
             if (gas != null && gasTank.canReceive(gas) && isValidGas.test(gas)) {
                 return new GasStack(gas, quantity);
@@ -103,23 +103,14 @@ public class GasConversionHandler {
      * Gets the amount of ticks the declared itemstack can fuel this machine.
      *
      * @param itemStack - itemstack to check with.
-     * @param needed    The max amount we need for use with IGasItem's so that we do not return a value that is too large, thus making it so it thinks there is no room.
+     * @param needed    The max amount we need for legacy gas containers so that we do not return a value that is too large, thus making it so it thinks there is no room.
      * @return fuel ticks
      */
     @Nullable
     public static GasStack getItemGas(ItemStack itemStack, int needed, BiFunction<Gas, Integer, GasStack> getIfValid) {
-        if (itemStack.getItem() instanceof IGasItem item) {
-            GasStack gas = item.getGas(itemStack);
-            //Check to make sure it can provide the gas it contains
-            if (gas != null && item.canProvideGas(itemStack, gas.getGas())) {
-                int amount = Math.min(needed, Math.min(gas.amount, item.getRate(itemStack)));
-                if (amount > 0) {
-                    GasStack gasStack = getIfValid.apply(gas.getGas(), amount);
-                    if (gasStack != null) {
-                        return gasStack;
-                    }
-                }
-            }
+        GasStack extractableGas = GasInventorySlot.getExtractableGas(itemStack, needed, getIfValid);
+        if (extractableGas != null) {
+            return extractableGas;
         }
         for (Entry<IMekanismIngredient<ItemStack>, GasStack> entry : ingredientToGas.entrySet()) {
             if (entry.getKey().contains(itemStack)) {
@@ -145,7 +136,65 @@ public class GasConversionHandler {
             return stacks;
         }
         //TODO: Maybe check for duplicates if things are in oredict and not? For the most part things assume there are no duplication at the moment
-        ingredients.forEach(ingredient ->   stacks.addAll(ingredient.getMatching()));
+        ingredients.forEach(ingredient -> stacks.addAll(ingredient.getMatching()));
         return stacks;
+    }
+
+    public static List<GasConversionSource> getConversionSourcesForGas(Gas type) {
+        if (type == null) {
+            return Collections.emptyList();
+        }
+        List<IMekanismIngredient<ItemStack>> ingredients = gasToIngredients.get(type);
+        if (ingredients == null) {
+            return Collections.emptyList();
+        }
+        List<GasConversionSource> sources = new ArrayList<>();
+        for (IMekanismIngredient<ItemStack> ingredient : ingredients) {
+            GasStack gasStack = ingredientToGas.get(ingredient);
+            if (gasStack == null || gasStack.amount <= 0 || gasStack.getGas() != type) {
+                continue;
+            }
+            for (ItemStack stack : ingredient.getMatching()) {
+                if (!stack.isEmpty()) {
+                    ItemStack source = stack.copy();
+                    source.setCount(1);
+                    sources.add(new GasConversionSource(source, gasStack.copy()));
+                }
+            }
+        }
+        return sources;
+    }
+
+    @Nullable
+    public static GasStack getConversionGas(ItemStack itemStack, Predicate<Gas> isValidGas) {
+        if (itemStack.isEmpty()) {
+            return null;
+        }
+        for (Entry<IMekanismIngredient<ItemStack>, GasStack> entry : ingredientToGas.entrySet()) {
+            GasStack gasStack = entry.getValue();
+            if (gasStack != null && gasStack.amount > 0 && isValidGas.test(gasStack.getGas()) && entry.getKey().contains(itemStack)) {
+                return gasStack.copy();
+            }
+        }
+        return null;
+    }
+
+    public static final class GasConversionSource {
+
+        private final ItemStack stack;
+        private final GasStack gasStack;
+
+        private GasConversionSource(ItemStack stack, GasStack gasStack) {
+            this.stack = stack;
+            this.gasStack = gasStack;
+        }
+
+        public ItemStack getStack() {
+            return stack.copy();
+        }
+
+        public GasStack getGasStack() {
+            return gasStack.copy();
+        }
     }
 }

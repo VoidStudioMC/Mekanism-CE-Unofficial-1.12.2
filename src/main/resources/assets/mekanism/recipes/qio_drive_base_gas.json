@@ -1,0 +1,29 @@
+{
+  "result": {
+    "item": "mekanism:qio_drive_base_gas"
+  },
+  "pattern": [
+    "ICI",
+    "C#C",
+    "ICI"
+  ],
+  "type": "mekanism:ore_shaped",
+  "key": {
+    "I": {
+      "ore": "ingotLead",
+      "type": "forge:ore_dict"
+    },
+    "C": {
+      "item": "mekanism:controlcircuit",
+      "data": 3
+    },
+    "#": {
+      "nbt": {
+        "tier": 0
+      },
+      "item": "mekanism:gastank",
+      "data": 0,
+      "type": "mekanism:item_nbt"
+    }
+  }
+}

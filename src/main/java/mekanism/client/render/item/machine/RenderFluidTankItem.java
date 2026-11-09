@@ -32,7 +32,12 @@ public class RenderFluidTankItem {
 
     private static FluidRenderMap<DisplayInteger[]> cachedCenterFluids = new FluidRenderMap<>();
 
-    private static int stages = 1400;
+    private static final int stages = 64;
+
+    public static void resetDisplayInts() {
+        cachedCenterFluids.values().forEach(DisplayInteger::deleteAll);
+        cachedCenterFluids.clear();
+    }
 
     public static void renderStack(@Nonnull ItemStack stack, TransformType transformType) {
         ItemBlockMachine itemMachine = (ItemBlockMachine) stack.getItem();
@@ -67,6 +72,7 @@ public class RenderFluidTankItem {
             MekanismRenderer.disableGlow(glowInfo);
             GlStateManager.disableBlend();
             GlStateManager.enableAlpha();
+            GlStateManager.shadeModel(GL11.GL_FLAT);
             GlStateManager.enableLighting();
             GlStateManager.disableCull();
             GlStateManager.popMatrix();
@@ -75,7 +81,7 @@ public class RenderFluidTankItem {
         GlStateManager.translate(0, -0.9F, 0);
         GlStateManager.scale(0.9F, 0.8F, 0.9F);
         MekanismRenderer.bindTexture(MekanismUtils.getResource(ResourceType.RENDER, "FluidTank.png"));
-        fluidTank.render(0.073F, tier,false);
+        fluidTank.render(0.073F, tier, false);
         GlStateManager.popMatrix();
     }
 

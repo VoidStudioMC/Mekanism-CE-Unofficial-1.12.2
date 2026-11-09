@@ -20,8 +20,11 @@ public class PacketUpdateInventorySlot implements IMessageHandler<UpdateInventor
             return null;
         }
         PacketHandler.handlePacket(() -> {
+            if (message.slotId < 0 || message.slotId >= player.inventory.getSizeInventory()) {
+                return;
+            }
             ItemStack stack = player.inventory.getStackInSlot(message.slotId);
-            if (!stack.isEmpty() && stack.getItem() instanceof IModuleContainerItem){
+            if (!stack.isEmpty() && stack.getItem() instanceof IModuleContainerItem) {
                 player.inventory.setInventorySlotContents(message.slotId, stack);
                 player.inventory.markDirty();
             }
@@ -31,7 +34,7 @@ public class PacketUpdateInventorySlot implements IMessageHandler<UpdateInventor
 
     public static class UpdateInventorySlotMessage implements IMessage {
 
-        private  int slotId;
+        private int slotId;
         private ItemStack stack;
 
         public UpdateInventorySlotMessage() {

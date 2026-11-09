@@ -2,19 +2,20 @@ package mekanism.common.tile.multiblock;
 
 import io.netty.buffer.ByteBuf;
 import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
-import mekanism.api.Coord4D;
-import mekanism.api.IHeatTransfer;
-import mekanism.api.TileNetworkList;
+import mekanism.api.*;
 import mekanism.api.gas.GasStack;
+import mekanism.api.heat.HeatAPI;
 import mekanism.common.Mekanism;
 import mekanism.common.MekanismFluids;
-import mekanism.common.capabilities.Capabilities;
-import mekanism.common.content.boiler.BoilerCache;
-import mekanism.common.content.boiler.BoilerUpdateProtocol;
-import mekanism.common.content.boiler.SynchronizedBoilerData;
+import mekanism.common.capabilities.holder.heat.IHeatCapacitorHolder;
+import mekanism.common.capabilities.holder.heat.ProxiedHeatCapacitorHolder;
+import mekanism.common.content.boiler.*;
 import mekanism.common.content.tank.SynchronizedTankData.ValveData;
 import mekanism.common.multiblock.MultiblockManager;
-import mekanism.common.util.*;
+import mekanism.common.util.InventoryUtils;
+import mekanism.common.util.LangUtils;
+import mekanism.common.util.MekanismUtils;
+import mekanism.common.util.TileUtils;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
@@ -26,11 +27,18 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.items.CapabilityItemHandler;
 
 import javax.annotation.Nonnull;
+import java.util.Collections;
+import java.util.Objects;
 import java.util.Set;
 
-public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoilerData> implements IHeatTransfer {
+public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoilerData> {
 
     protected static final int[] INV_SLOTS = {0, 1};
+
+    private final BoilerWaterTank internalWaterTank = new BoilerWaterTank(this);
+    private final BoilerSteamTank internalSteamTank = new BoilerSteamTank(this);
+    private final BoilerInputGasTank internalInputGasTank = new BoilerInputGasTank(this);
+    private final BoilerOutputGasTank internalOutputGasTank = new BoilerOutputGasTank(this);
 
     /**
      * A client-sided set of valves on this tank's structure that are currently active, used on the client for rendering fluids.
@@ -51,22 +59,24 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
 
     public TileEntityBoilerCasing(String name) {
         super(name);
-        inventory = NonNullListSynchronized.withSize(INV_SLOTS.length, ItemStack.EMPTY);
+        if (getClass() == TileEntityBoilerCasing.class) {
+            initializeInventorySlots();
+        }
     }
 
     @Override
     public void onUpdateClient() {
         super.onUpdateClient();
         if (structure != null && clientHasStructure && isRendering) {
-            float targetScale = (float) (structure.waterStored != null ? structure.waterStored.amount : 0) / clientWaterCapacity;
-            if (Math.abs(prevWaterScale - targetScale) > 0.01) {
+            int stored = structure.waterStored == null ? 0 : structure.waterStored.amount;
+            float targetScale = clientWaterCapacity <= 0 ? 0 : Math.min(1, Math.max(0, stored / (float) clientWaterCapacity));
+            float difference = Math.abs(prevWaterScale - targetScale);
+            if (difference > 0.01) {
                 prevWaterScale = (9 * prevWaterScale + targetScale) / 10;
-            }
-        }
-        if (structure != null && clientHasStructure && isRendering) {
-            float targetScale = (float) (structure.InputGas != null ? structure.InputGas.amount : 0) / clientWaterCapacity;
-            if (Math.abs(prevWaterScale - targetScale) > 0.01) {
-                prevWaterScale = (9 * prevWaterScale + targetScale) / 10;
+            } else if (stored > 0 && (stored >= clientWaterCapacity || prevWaterScale == 0)) {
+                prevWaterScale = targetScale;
+            } else if (stored == 0 && prevWaterScale < 0.01) {
+                prevWaterScale = 0;
             }
         }
         if (!clientHasStructure || !isRendering) {
@@ -83,25 +93,15 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
-        if (structure != null) {
-            if (structure.waterStored != null && structure.waterStored.amount <= 0) {
-                structure.waterStored = null;
-                markNoUpdateSync();
-            }
-            if (structure.steamStored != null && structure.steamStored.amount <= 0) {
-                structure.steamStored = null;
-                markNoUpdateSync();
-            }
-            if (structure.InputGas != null && structure.InputGas.amount <= 0) {
-                structure.InputGas = null;
-                markNoUpdateSync();
-            }
-            if (structure.OutputGas != null && structure.OutputGas.amount <= 0) {
-                structure.OutputGas = null;
+        if (structure != null && structure.isFormed()) {
+            simulateAdjacent();
+            if (structure.sanitizeStoredSubstances()) {
                 markNoUpdateSync();
             }
 
-            if (isRendering) {
+            //The renderer may be in an unloaded chunk while another casing remains loaded. Let any
+            //loaded casing own structure-wide processing, while the claim keeps it to once per tick.
+            if (tryClaimStructureServerTick()) {
                 boolean needsValveUpdate = false;
                 for (ValveData data : structure.valves) {
                     if (data.activeTicks > 0) {
@@ -114,48 +114,63 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
                 }
 
                 boolean needsHotUpdate = false;
-                boolean newHot = structure.temperature >= SynchronizedBoilerData.BASE_BOIL_TEMP - 0.01F;
+                boolean newHot = HeatAPI.isFinite(structure.getTemperature()) &&
+                        structure.getTemperature() >= SynchronizedBoilerData.BASE_BOIL_TEMP - 0.01F;
+                if (structure.inventoryID != null) {
+                    SynchronizedBoilerData.hotMap.put(structure.inventoryID, newHot);
+                }
                 if (newHot != structure.clientHot) {
                     needsHotUpdate = true;
                     structure.clientHot = newHot;
                 }
 
-                double[] d = structure.simulateHeat();
-                structure.applyTemperatureChange();
-                structure.lastEnvironmentLoss = d[1];
-                if (structure.InputGas != null) {
-                    int OutputAmount = structure.OutputGas != null ? structure.OutputGas.amount : 0;
-                    double heatAvailable = structure.getTemp();
-                    structure.lastMaxBoil = (int) Math.floor(heatAvailable / SynchronizedBoilerData.getHeatEnthalpy());
-                    int amountToBoil = Math.min(structure.lastMaxBoil, structure.InputGas.amount);
-                    amountToBoil = Math.min(amountToBoil, (structure.steamVolume * BoilerUpdateProtocol.STEAM_PER_TANK) - OutputAmount);
-                    structure.InputGas.amount -= amountToBoil;
-                    if (structure.OutputGas == null) {
-                        structure.OutputGas = new GasStack(MekanismFluids.Sodium, amountToBoil);
-                    } else {
-                        structure.OutputGas.amount += amountToBoil;
-                    }
-                    if (structure.OutputGas.amount != structure.steamVolume * BoilerUpdateProtocol.STEAM_PER_TANK) {
-                        structure.temperature += (amountToBoil * SynchronizedBoilerData.getHeatEnthalpy()) / structure.locations.size();
-                        structure.lastBoilRate = amountToBoil;
+                double environmentLoss = structure.simulateEnvironment();
+                structure.lastEnvironmentLoss = HeatAPI.isFinite(environmentLoss) ?
+                        Math.max(0, Math.min(HeatAPI.MAX_HEAT, environmentLoss)) : 0;
+                GasStack superheatedCoolant = internalInputGasTank.getGas();
+                if (superheatedCoolant != null && superheatedCoolant.getGas() == MekanismFluids.SuperheatedSodium &&
+                        (internalOutputGasTank.isEmpty() || internalOutputGasTank.isTypeEqual(MekanismFluids.Sodium))) {
+                    //Match higher-version behavior: cool a fraction of heated coolant and scale it down at high case temperatures.
+                    double portionToCool = SynchronizedBoilerData.COOLANT_COOLING_EFFICIENCY * superheatedCoolant.amount;
+                    double coolingAmount = portionToCool * (1 - HeatAPI.sanitizeTemperature(structure.getTemperature()) /
+                            SynchronizedBoilerData.HEATED_COOLANT_TEMP);
+                    int amountToCool = HeatAPI.isFinite(coolingAmount) ?
+                            (int) Math.min(superheatedCoolant.amount, Math.max(0, Math.min(Integer.MAX_VALUE, Math.round(coolingAmount)))) : 0;
+                    if (amountToCool > 0) {
+                        GasStack cooledCoolant = new GasStack(MekanismFluids.Sodium, amountToCool);
+                        GasStack simulatedRemainder = internalOutputGasTank.insert(cooledCoolant, Action.SIMULATE, AutomationType.INTERNAL);
+                        int accepted = amountToCool - (simulatedRemainder == null ? 0 : simulatedRemainder.amount);
+                        GasStack extracted = accepted <= 0 ? null : internalInputGasTank.extract(accepted, Action.EXECUTE, AutomationType.INTERNAL);
+                        int cooled = extracted == null ? 0 : extracted.amount;
+                        if (cooled > 0) {
+                            internalOutputGasTank.insert(new GasStack(MekanismFluids.Sodium, cooled), Action.EXECUTE, AutomationType.INTERNAL);
+                            structure.getHeatCapacitor().handleHeat(HeatAPI.multiplyHeat(cooled, SynchronizedBoilerData.SODIUM_THERMAL_ENTHALPY));
+                        }
                     }
                 }
 
-                if (structure.temperature >= SynchronizedBoilerData.BASE_BOIL_TEMP && structure.waterStored != null) {
-                    int steamAmount = structure.steamStored != null ? structure.steamStored.amount : 0;
+                if (structure.getTemperature() >= SynchronizedBoilerData.BASE_BOIL_TEMP && !internalWaterTank.isEmpty() && FluidRegistry.getFluid("steam") != null) {
                     double heatAvailable = structure.getHeatAvailable();
-                    structure.lastMaxBoil = (int) Math.floor(heatAvailable / SynchronizedBoilerData.getHeatEnthalpy());
-                    int amountToBoil = Math.min(structure.lastMaxBoil, structure.waterStored.amount);
-                    amountToBoil = Math.min(amountToBoil, (structure.steamVolume * BoilerUpdateProtocol.STEAM_PER_TANK) - steamAmount);
-                    structure.waterStored.amount -= amountToBoil;
-                    if (structure.steamStored == null) {
-                        structure.steamStored = new FluidStack(FluidRegistry.getFluid("steam"), amountToBoil);
-                    } else {
-                        structure.steamStored.amount += amountToBoil;
+                    double maxBoil = SynchronizedBoilerData.getSteamEnergyEfficiency() * heatAvailable /
+                            SynchronizedBoilerData.getHeatEnthalpy();
+                    structure.lastMaxBoil = HeatAPI.isFinite(maxBoil) ?
+                            (int) Math.max(0, Math.min(Integer.MAX_VALUE, Math.floor(maxBoil))) : 0;
+                    int amountToBoil = Math.min(structure.lastMaxBoil, internalWaterTank.getFluidAmount());
+                    int boiled = 0;
+                    if (amountToBoil > 0) {
+                        FluidStack steam = new FluidStack(FluidRegistry.getFluid("steam"), amountToBoil);
+                        FluidStack simulatedRemainder = internalSteamTank.insert(steam, Action.SIMULATE, AutomationType.INTERNAL);
+                        int accepted = amountToBoil - (simulatedRemainder == null ? 0 : simulatedRemainder.amount);
+                        FluidStack extracted = accepted <= 0 ? null : internalWaterTank.extract(accepted, Action.EXECUTE, AutomationType.INTERNAL);
+                        boiled = extracted == null ? 0 : extracted.amount;
+                        if (boiled > 0) {
+                            internalSteamTank.insert(new FluidStack(FluidRegistry.getFluid("steam"), boiled), Action.EXECUTE, AutomationType.INTERNAL);
+                            double consumedHeat = HeatAPI.multiplyHeat(boiled,
+                                    SynchronizedBoilerData.getHeatEnthalpy() / SynchronizedBoilerData.getSteamEnergyEfficiency());
+                            structure.getHeatCapacitor().handleHeat(-consumedHeat);
+                        }
                     }
-
-                    structure.temperature -= (amountToBoil * SynchronizedBoilerData.getHeatEnthalpy()) / structure.locations.size();
-                    structure.lastBoilRate = amountToBoil;
+                    structure.lastBoilRate = boiled;
                 } else {
                     structure.lastBoilRate = 0;
                     structure.lastMaxBoil = 0;
@@ -171,6 +186,8 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
                 structure.prevOutputGas = structure.OutputGas != null ? structure.OutputGas.copy() : null;
                 MekanismUtils.saveChunk(this);
             }
+            //simulateAdjacent and the structure tick both mutate shared state after the base cache sync.
+            syncCachedDataFromStructure();
         }
     }
 
@@ -201,6 +218,20 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
     }
 
     @Override
+    protected IHeatCapacitorHolder getInitialHeatCapacitors(IContentsListener listener) {
+        return ProxiedHeatCapacitorHolder.create(
+                side -> structure != null && structure.isFormed(),
+                side -> structure != null && structure.isFormed(),
+                side -> structure == null || !structure.isFormed() ? Collections.emptyList() : Collections.singletonList(structure.getHeatCapacitor())
+        );
+    }
+
+    @Override
+    protected boolean persistHeatCapacitors() {
+        return false;
+    }
+
+    @Override
     public MultiblockManager<SynchronizedBoilerData> getManager() {
         return Mekanism.boilerManager;
     }
@@ -210,12 +241,14 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
         super.getNetworkedData(data);
 
         if (structure != null) {
-            data.add(structure.waterVolume * BoilerUpdateProtocol.WATER_PER_TANK);
-            data.add(structure.steamVolume * BoilerUpdateProtocol.STEAM_PER_TANK);
-            data.add(structure.lastEnvironmentLoss);
+            data.add(structure.getWaterCapacity());
+            data.add(structure.getSteamCapacity());
+            data.add(HeatAPI.isFinite(structure.lastEnvironmentLoss) ?
+                    Math.max(0, Math.min(HeatAPI.MAX_HEAT, structure.lastEnvironmentLoss)) : 0);
             data.add(structure.lastBoilRate);
             data.add(structure.superheatingElements);
-            data.add(structure.temperature);
+            data.add(structure.getHeatCapacitor().getHeatCapacity());
+            data.add(structure.getHeatCapacitor().getHeat());
             data.add(structure.lastMaxBoil);
 
             TileUtils.addFluidStack(data, structure.waterStored);
@@ -248,7 +281,7 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
     }
 
     public double getTemperature() {
-        return structure != null ? structure.temperature : 0;
+        return structure != null ? structure.getTemperature() : HeatAPI.AMBIENT_TEMP;
     }
 
     public int getLastBoilRate() {
@@ -263,19 +296,47 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
         return structure != null ? structure.superheatingElements : 0;
     }
 
+    public int getBoilCapacity() {
+        return structure != null ? structure.getBoilCapacity() : 0;
+    }
+
+    public BoilerWaterTank getWaterTank() {
+        return internalWaterTank;
+    }
+
+    public BoilerSteamTank getSteamTank() {
+        return internalSteamTank;
+    }
+
+    public BoilerInputGasTank getInputGasTank() {
+        return internalInputGasTank;
+    }
+
+    public BoilerOutputGasTank getOutputGasTank() {
+        return internalOutputGasTank;
+    }
+
     @Override
     public void handlePacketData(ByteBuf dataStream) {
+        String previousInventoryId = structure == null ? null : structure.inventoryID;
         super.handlePacketData(dataStream);
 
         if (FMLCommonHandler.instance().getEffectiveSide().isClient()) {
+            String currentInventoryId = structure == null ? null : structure.inventoryID;
+            if (previousInventoryId != null && (!clientHasStructure || !Objects.equals(previousInventoryId, currentInventoryId))) {
+                SynchronizedBoilerData.clientHotMap.remove(previousInventoryId);
+            }
             if (clientHasStructure) {
-                clientWaterCapacity = dataStream.readInt();
-                clientSteamCapacity = dataStream.readInt();
-                structure.lastEnvironmentLoss = dataStream.readDouble();
-                structure.lastBoilRate = dataStream.readInt();
-                structure.superheatingElements = dataStream.readInt();
-                structure.temperature = dataStream.readDouble();
-                structure.lastMaxBoil = dataStream.readInt();
+                clientWaterCapacity = Math.max(0, dataStream.readInt());
+                clientSteamCapacity = Math.max(0, dataStream.readInt());
+                double environmentLoss = dataStream.readDouble();
+                structure.lastEnvironmentLoss = HeatAPI.isFinite(environmentLoss) ?
+                        Math.max(0, Math.min(HeatAPI.MAX_HEAT, environmentLoss)) : 0;
+                structure.lastBoilRate = Math.max(0, dataStream.readInt());
+                structure.superheatingElements = Math.max(0, dataStream.readInt());
+                structure.getHeatCapacitor().setHeatCapacityFromPacket(dataStream.readDouble());
+                structure.getHeatCapacitor().setHeat(dataStream.readDouble());
+                structure.lastMaxBoil = Math.max(0, dataStream.readInt());
 
                 structure.waterStored = TileUtils.readFluidStack(dataStream);
                 structure.steamStored = TileUtils.readFluidStack(dataStream);
@@ -285,7 +346,9 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
 
                 if (isRendering) {
                     structure.clientHot = dataStream.readBoolean();
-                    SynchronizedBoilerData.clientHotMap.put(structure.inventoryID, structure.clientHot);
+                    if (structure.inventoryID != null) {
+                        SynchronizedBoilerData.clientHotMap.put(structure.inventoryID, structure.clientHot);
+                    }
                     int size = dataStream.readInt();
                     valveViewing.clear();
                     for (int i = 0; i < size; i++) {
@@ -303,62 +366,6 @@ public class TileEntityBoilerCasing extends TileEntityMultiblock<SynchronizedBoi
                 }
             }
         }
-    }
-
-    @Override
-    public double getTemp() {
-        return 0;
-    }
-
-    @Override
-    public double getInverseConductionCoefficient() {
-        return SynchronizedBoilerData.CASING_INVERSE_CONDUCTION_COEFFICIENT;
-    }
-
-    @Override
-    public double getInsulationCoefficient(EnumFacing side) {
-        return SynchronizedBoilerData.CASING_INSULATION_COEFFICIENT;
-    }
-
-    @Override
-    public void transferHeatTo(double heat) {
-        if (structure != null) {
-            structure.heatToAbsorb += heat;
-        }
-    }
-
-    @Override
-    public double[] simulateHeat() {
-        return new double[]{0, 0};
-    }
-
-    @Override
-    public double applyTemperatureChange() {
-        return 0;
-    }
-
-    @Override
-    public boolean canConnectHeat(EnumFacing side) {
-        return structure != null;
-    }
-
-    @Override
-    public IHeatTransfer getAdjacent(EnumFacing side) {
-        return null;
-    }
-
-    //TODO: Decide if heat capability should be moved to valve only
-    @Override
-    public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing side) {
-        return capability == Capabilities.HEAT_TRANSFER_CAPABILITY || super.hasCapability(capability, side);
-    }
-
-    @Override
-    public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing side) {
-        if (capability == Capabilities.HEAT_TRANSFER_CAPABILITY) {
-            return Capabilities.HEAT_TRANSFER_CAPABILITY.cast(this);
-        }
-        return super.getCapability(capability, side);
     }
 
     @Override

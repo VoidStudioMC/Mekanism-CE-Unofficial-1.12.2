@@ -1,7 +1,10 @@
 package mekanism.common;
 
 import mekanism.api.util.ItemInfo;
+import mekanism.common.lib.WildcardMatcher;
 import mekanism.common.util.ItemRegistryUtils;
+import mekanism.common.util.MekanismUtils;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
 import net.minecraftforge.oredict.OreDictionary;
@@ -15,7 +18,10 @@ public final class OreDictCache {
 
     public static Map<ItemInfo, List<String>> cachedKeys = new ConcurrentHashMap<>();
     public static Map<String, List<ItemStack>> oreDictStacks = new ConcurrentHashMap<>();
+    public static Map<String, List<ItemStack>> oreDictBlockStacks = new ConcurrentHashMap<>();
     public static Map<String, List<ItemStack>> modIDStacks = new ConcurrentHashMap<>();
+    public static Map<String, List<ItemStack>> modIDBlockStacks = new ConcurrentHashMap<>();
+    private static final Map<String, List<ItemStack>> qioModIDStacks = new ConcurrentHashMap<>();
 
     public static List<String> getOreDictName(ItemStack check) {
         if (check.isEmpty()) {
@@ -37,8 +43,9 @@ public final class OreDictCache {
     }
 
     public static List<ItemStack> getOreDictStacks(String oreName, boolean forceBlock) {
-        if (oreDictStacks.get(oreName) != null) {
-            return oreDictStacks.get(oreName);
+        Map<String, List<ItemStack>> stackCache = forceBlock ? oreDictBlockStacks : oreDictStacks;
+        if (stackCache.get(oreName) != null) {
+            return stackCache.get(oreName);
         }
 
         List<String> keys = new ArrayList<>();
@@ -72,20 +79,21 @@ public final class OreDictCache {
                 }
             });
         });
-        oreDictStacks.put(oreName, stacks);
+        stackCache.put(oreName, stacks);
         return stacks;
     }
 
     public static List<ItemStack> getModIDStacks(String modName, boolean forceBlock) {
-        if (modIDStacks.get(modName) != null) {
-            return modIDStacks.get(modName);
+        Map<String, List<ItemStack>> stackCache = forceBlock ? modIDBlockStacks : modIDStacks;
+        if (stackCache.get(modName) != null) {
+            return stackCache.get(modName);
         }
         List<ItemStack> stacks = new ArrayList<>();
         for (String key : OreDictionary.getOreNames()) {
             for (ItemStack stack : OreDictionary.getOres(key, false)) {
                 ItemStack toAdd = stack.copy();
                 String s = ItemRegistryUtils.getMod(toAdd);
-                if (!stacks.contains(stack) && toAdd.getItem() instanceof ItemBlock) {
+                if (!stacks.contains(stack) && (!forceBlock || toAdd.getItem() instanceof ItemBlock)) {
                     if (modName.equals(s) || modName.equals("*")) {
                         stacks.add(stack.copy());
                     } else if (modName.endsWith("*") && !modName.startsWith("*")) {
@@ -104,7 +112,23 @@ public final class OreDictCache {
                 }
             }
         }
-        modIDStacks.put(modName, stacks);
+        stackCache.put(modName, stacks);
         return stacks;
+    }
+
+    /**
+     * QIO follows modern Mekanism and matches the registry namespace, not the localized mod name.
+     */
+    public static List<ItemStack> getQIOModIDStacks(String modID) {
+        return qioModIDStacks.computeIfAbsent(modID, id -> {
+            List<ItemStack> stacks = new ArrayList<>();
+            for (Item item : Item.REGISTRY) {
+                ItemStack stack = new ItemStack(item);
+                if (!stack.isEmpty() && WildcardMatcher.matches(id, MekanismUtils.getModId(stack))) {
+                    stacks.add(stack);
+                }
+            }
+            return stacks;
+        });
     }
 }

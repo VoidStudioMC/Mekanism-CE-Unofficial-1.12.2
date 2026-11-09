@@ -3,13 +3,17 @@ package mekanism.common.item;
 import cofh.api.core.ISecurable;
 import cofh.api.item.IUpgradeItem;
 import cofh.api.tileentity.IUpgradeable;
+import mekanism.common.advancements.MekanismCriteriaTriggers;
 import mekanism.common.base.IMetaItem;
-import mekanism.common.base.ITierUpgradeable;
 import mekanism.common.config.MekanismConfig;
 import mekanism.common.tier.BaseTier;
 import mekanism.common.tile.prefab.TileEntityBasicBlock;
+import mekanism.common.upgrade.IUpgradeData;
+import mekanism.common.util.UpgradeUtils;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.creativetab.CreativeTabs;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.item.ItemStack;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumActionResult;
@@ -44,15 +48,23 @@ public class ItemTierInstaller extends ItemMekanism implements IMetaItem, IUpgra
         }
         TileEntity tile = world.getTileEntity(pos);
         ItemStack stack = player.getHeldItem(hand);
-        BaseTier tier = BaseTier.values()[stack.getItemDamage()];
-        if (tile instanceof ITierUpgradeable upgradeable) {
+        BaseTier tier = getTier(stack);
+        if (UpgradeUtils.isUpgradeable(tile)) {
             if (tile instanceof TileEntityBasicBlock basicBlock && !basicBlock.playersUsing.isEmpty()) {
                 return EnumActionResult.FAIL;
             }
-            if (upgradeable.CanInstalled() && upgradeable.upgrade(tier) && upgradeable.UpgradeAmount() <= stack.getCount()) {
+            if (!UpgradeUtils.canInstallUpgrade(tile, tier)) {
+                return EnumActionResult.PASS;
+            }
+            IUpgradeData upgradeData = UpgradeUtils.getUpgradeData(tile, tier);
+            IBlockState upgradeResult = UpgradeUtils.getUpgradeResult(tile, tier);
+            boolean upgraded = upgradeData != null && (upgradeResult == null ? UpgradeUtils.parseUpgradeData(tile, upgradeData) :
+                    UpgradeUtils.replaceTileForUpgrade(tile, upgradeResult, upgradeData));
+            if (upgraded) {
                 if (!player.capabilities.isCreativeMode) {
-                    stack.shrink(upgradeable.UpgradeAmount());
+                    stack.shrink(1);
                 }
+                triggerInstallerUse(player);
                 return EnumActionResult.SUCCESS;
             }
             return EnumActionResult.PASS;
@@ -60,7 +72,11 @@ public class ItemTierInstaller extends ItemMekanism implements IMetaItem, IUpgra
         if (Loader.isModLoaded("cofhcore")) {
             return TEUpgradeable(tile, player, stack);
         }
-        return addOtherMahineUpgrade(tile, stack, tier, player, world, pos, side, hitX, hitY, hitZ, hand);
+        EnumActionResult result = addOtherMahineUpgrade(tile, stack, tier, player, world, pos, side, hitX, hitY, hitZ, hand);
+        if (result == EnumActionResult.SUCCESS) {
+            triggerInstallerUse(player);
+        }
+        return result;
     }
 
     //用于处理其他的机器的升级 可以mixin这块
@@ -85,16 +101,23 @@ public class ItemTierInstaller extends ItemMekanism implements IMetaItem, IUpgra
                     stack.shrink(1);
 
                 }
+                triggerInstallerUse(player);
                 return EnumActionResult.SUCCESS;
             }
         }
         return EnumActionResult.PASS;
     }
 
+    private void triggerInstallerUse(EntityPlayer player) {
+        if (player instanceof EntityPlayerMP playerMP) {
+            MekanismCriteriaTriggers.USE_TIER_INSTALLER.trigger(playerMP);
+        }
+    }
+
 
     @Override
     public String getTexture(int meta) {
-        return BaseTier.values()[meta].getSimpleName() + "TierInstaller";
+        return getTier(meta).getSimpleName() + "TierInstaller";
     }
 
     @Override
@@ -114,19 +137,19 @@ public class ItemTierInstaller extends ItemMekanism implements IMetaItem, IUpgra
     @Nonnull
     @Override
     public String getItemStackDisplayName(@Nonnull ItemStack stack) {
-        return BaseTier.values()[stack.getItemDamage()].getColor() + super.getItemStackDisplayName(stack);
+        return getTier(stack).getColor() + super.getItemStackDisplayName(stack);
     }
 
     @Nonnull
     @Override
     public String getTranslationKey(ItemStack stack) {
-        return "item." + BaseTier.values()[stack.getItemDamage()].getSimpleName().toLowerCase(Locale.ROOT) + "TierInstaller";
+        return "item." + getTier(stack).getSimpleName().toLowerCase(Locale.ROOT) + "TierInstaller";
     }
 
     @Override
     @Optional.Method(modid = "cofhcore")
     public UpgradeType getUpgradeType(ItemStack stack) {
-        BaseTier tier = BaseTier.values()[stack.getItemDamage()];
+        BaseTier tier = getTier(stack);
         if (tier == BaseTier.CREATIVE) {
             return UpgradeType.CREATIVE;
         }
@@ -136,12 +159,23 @@ public class ItemTierInstaller extends ItemMekanism implements IMetaItem, IUpgra
     @Override
     @Optional.Method(modid = "cofhcore")
     public byte getUpgradeLevel(ItemStack stack) {
-        BaseTier tier = BaseTier.values()[stack.getItemDamage()];
+        BaseTier tier = getTier(stack);
         return switch (tier) {
             case BASIC -> (byte) 1;
             case ADVANCED -> (byte) 2;
             case ELITE -> (byte) 3;
             case ULTIMATE, CREATIVE -> (byte) 4;
         };
+    }
+
+    private BaseTier getTier(ItemStack stack) {
+        return getTier(stack.getItemDamage());
+    }
+
+    private BaseTier getTier(int meta) {
+        if (meta >= 0 && meta < BaseTier.values().length) {
+            return BaseTier.values()[meta];
+        }
+        return BaseTier.BASIC;
     }
 }

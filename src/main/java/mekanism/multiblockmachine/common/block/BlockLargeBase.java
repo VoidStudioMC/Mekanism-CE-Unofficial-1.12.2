@@ -1,7 +1,7 @@
 package mekanism.multiblockmachine.common.block;
 
+import mekanism.api.Coord4D;
 import mekanism.api.IMekWrench;
-import mekanism.api.energy.IEnergizedItem;
 import mekanism.api.energy.IStrictEnergyStorage;
 import mekanism.common.base.*;
 import mekanism.common.block.BlockMekanismContainer;
@@ -12,9 +12,7 @@ import mekanism.common.security.ISecurityItem;
 import mekanism.common.security.ISecurityTile;
 import mekanism.common.tile.prefab.TileEntityBasicBlock;
 import mekanism.common.tile.prefab.TileEntityContainerBlock;
-import mekanism.common.util.ItemDataUtils;
-import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.SecurityUtils;
+import mekanism.common.util.*;
 import mekanism.multiblockmachine.common.MekanismMultiblockMachine;
 import net.minecraft.block.Block;
 import net.minecraft.block.material.Material;
@@ -95,31 +93,40 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
     public void onBlockPlacedBy(World world, BlockPos pos, IBlockState state, EntityLivingBase placer, ItemStack stack) {
         if (world.getTileEntity(pos) instanceof TileEntityBasicBlock tileEntity) {
             EnumFacing change = EnumFacing.SOUTH;
-            if (tileEntity.canSetFacing(EnumFacing.DOWN) && tileEntity.canSetFacing(EnumFacing.UP)) {
-                int height = Math.round(placer.rotationPitch);
-                if (height >= 65) {
-                    change = EnumFacing.UP;
-                } else if (height <= -65) {
-                    change = EnumFacing.DOWN;
+            if (placer != null) {
+                if (tileEntity.canSetFacing(EnumFacing.DOWN) && tileEntity.canSetFacing(EnumFacing.UP)) {
+                    int height = Math.round(placer.rotationPitch);
+                    if (height >= 65) {
+                        change = EnumFacing.UP;
+                    } else if (height <= -65) {
+                        change = EnumFacing.DOWN;
+                    }
                 }
-            }
 
-            if (change != EnumFacing.DOWN && change != EnumFacing.UP) {
-                int side = MathHelper.floor((double) (placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
-                change = switch (side) {
-                    case 0 -> EnumFacing.NORTH;
-                    case 1 -> EnumFacing.EAST;
-                    case 2 -> EnumFacing.SOUTH;
-                    case 3 -> EnumFacing.WEST;
-                    default -> change;
-                };
+                if (change != EnumFacing.DOWN && change != EnumFacing.UP) {
+                    int side = MathHelper.floor((double) (placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
+                    change = switch (side) {
+                        case 0 -> EnumFacing.NORTH;
+                        case 1 -> EnumFacing.EAST;
+                        case 2 -> EnumFacing.SOUTH;
+                        case 3 -> EnumFacing.WEST;
+                        default -> change;
+                    };
+                }
             }
 
             tileEntity.setFacing(change);
             tileEntity.redstone = world.getRedstonePowerFromNeighbors(pos) > 0;
             if (tileEntity instanceof IBoundingBlock block) {
-                block.onPlace();
+                IBoundingBlock.PlacementResult result = block.tryPlaceBoundingBlocks(world, Coord4D.get(tileEntity));
+                if (result == IBoundingBlock.PlacementResult.LEGACY) {
+                    block.onPlace();
+                } else if (result == IBoundingBlock.PlacementResult.BLOCKED) {
+                    world.setBlockToAir(pos);
+                    return;
+                }
             }
+            MekanismPlacementData.apply(world, pos, placer, stack);
         }
     }
 
@@ -127,7 +134,9 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
     public void breakBlock(World world, @Nonnull BlockPos pos, @Nonnull IBlockState state) {
         if (world.getTileEntity(pos) instanceof TileEntityBasicBlock tileEntity) {
             if (tileEntity instanceof IBoundingBlock block) {
-                block.onBreak();
+                if (!block.removeBoundingBlocks(world, pos)) {
+                    block.onBreak();
+                }
             }
         }
         super.breakBlock(world, pos, state);
@@ -257,7 +266,7 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
                 }
             }
             if (tileEntity instanceof IUpgradeTile upgradeTile) {
-                upgradeTile.getComponent().write(ItemDataUtils.getDataMap(itemStack));
+                upgradeTile.writeUpgrades(ItemDataUtils.getDataMap(itemStack));
             }
             if (tileEntity instanceof ISustainedData data) {
                 data.writeSustainedData(itemStack);
@@ -265,7 +274,7 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
             if (tileEntity instanceof IRedstoneControl control) {
                 ItemDataUtils.setInt(itemStack, "controlType", control.getControlType().ordinal());
             }
-            if (tileEntity instanceof TileEntityContainerBlock containerBlock && !containerBlock.inventory.isEmpty()) {
+            if (tileEntity instanceof TileEntityContainerBlock containerBlock && !containerBlock.isEmpty()) {
                 if (itemStack.getItem() instanceof ISustainedInventory inventory) {
                     inventory.setInventory(containerBlock.getInventory(), itemStack);
                 }
@@ -278,9 +287,7 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
                 }
             }
             if (tileEntity instanceof IStrictEnergyStorage storage) {
-                if (itemStack.getItem() instanceof IEnergizedItem energizedItem) {
-                    energizedItem.setEnergy(itemStack, storage.getEnergy());
-                }
+                StorageUtils.setStoredEnergy(itemStack, storage.getEnergy(), storage.getMaxEnergy());
             }
         }
         return itemStack;
@@ -296,8 +303,8 @@ public abstract class BlockLargeBase extends BlockMekanismContainer {
     @Deprecated
     public int getComparatorInputOverride(IBlockState state, World world, BlockPos pos) {
         TileEntity tileEntity = world.getTileEntity(pos);
-        if (tileEntity instanceof IComparatorSupport comparatorSupport) {
-            return comparatorSupport.getRedstoneLevel();
+        if (tileEntity instanceof IComparatorSupport comparatorSupport && comparatorSupport.supportsComparator()) {
+            return comparatorSupport.getCurrentRedstoneLevel();
         }
         return 0;
     }

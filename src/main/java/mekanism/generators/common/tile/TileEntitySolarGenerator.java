@@ -1,27 +1,38 @@
 package mekanism.generators.common.tile;
 
 import io.netty.buffer.ByteBuf;
+import mekanism.api.Action;
+import mekanism.api.AutomationType;
+import mekanism.api.IContentsListener;
 import mekanism.api.TileNetworkList;
-import mekanism.common.base.IMachineSlotTip;
+import mekanism.common.base.ISpecialSelectionWireframeTile;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.util.ChargeUtils;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
 import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.NonNullListSynchronized;
 import micdoodle8.mods.galacticraft.api.world.ISolarLevel;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.item.ItemStack;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.IBlockAccess;
 import net.minecraft.world.biome.Biome;
 import net.minecraftforge.fml.common.FMLCommonHandler;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
 
-public class TileEntitySolarGenerator extends TileEntityGenerator implements IMachineSlotTip {
+public class TileEntitySolarGenerator extends TileEntityGenerator implements ISpecialSelectionWireframeTile {
 
     private static final String[] methods = new String[]{"getEnergy", "getOutput", "getMaxEnergy", "getEnergyNeeded", "getSeesSun"};
 
     private boolean seesSun;
     private boolean needsRainCheck = true;
     private float peakOutput;
+    private double productionThisTick;
+    private EnergyInventorySlot energySlot;
 
     public TileEntitySolarGenerator() {
         this("SolarGenerator", MekanismConfig.current().generators.solarGeneratorStorage.val(), MekanismConfig.current().generators.solarGeneration.val() * 2);
@@ -29,17 +40,18 @@ public class TileEntitySolarGenerator extends TileEntityGenerator implements IMa
 
     public TileEntitySolarGenerator(String name, double maxEnergy, double output) {
         super("solar", name, maxEnergy, output);
-        inventory = NonNullListSynchronized.withSize(1, ItemStack.EMPTY);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = createInventorySlotHelper();
+        energySlot = builder.addSlot(EnergyInventorySlot.drain(this, listener, 143, 35));
+        return builder.build();
     }
 
     public boolean canSeeSun() {
         return seesSun;
-    }
-
-    @Nonnull
-    @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        return new int[]{0};
     }
 
     @Override
@@ -71,17 +83,31 @@ public class TileEntitySolarGenerator extends TileEntityGenerator implements IMa
     @Override
     public void onAsyncUpdateServer() {
         super.onAsyncUpdateServer();
-        ChargeUtils.charge(0, this);
-        // Sort out if the generator can see the sun; we no longer check if it's raining here,
-        // since under the new rules, we can still generate power when it's raining, albeit at a
-        // significant penalty.
-        seesSun = world.isDaytime() && canSeeSky() && !world.provider.isNether();
+        energySlot.drainContainer();
         if (canOperate()) {
             setActive(true);
-            setEnergy(getEnergy() + getProduction());
+            getEnergyContainer().insert(productionThisTick, Action.EXECUTE, AutomationType.INTERNAL);
         } else {
             setActive(false);
         }
+    }
+
+    @Override
+    public void onUpdateServer() {
+        super.onUpdateServer();
+        seesSun = world.isDaytime() && canSeeSky() && !world.provider.isNether();
+        productionThisTick = getProduction();
+    }
+
+    @Override
+    protected boolean supportsAsyncIdleSkipping() {
+        return getClass() == TileEntitySolarGenerator.class || getClass() == TileEntityAdvancedSolarGenerator.class;
+    }
+
+    @Override
+    protected boolean isAsyncUpdateIdle() {
+        // Sunlight and production are refreshed on the server thread before this check, including at dawn.
+        return energySlot.isEmpty() && !getActive() && !canOperate();
     }
 
     protected boolean canSeeSky() {
@@ -91,22 +117,14 @@ public class TileEntitySolarGenerator extends TileEntityGenerator implements IMa
     @Override
     public boolean canExtractItem(int slotID, @Nonnull ItemStack itemstack, @Nonnull EnumFacing side) {
         if (slotID == 0) {
-            return ChargeUtils.canBeOutputted(itemstack, true);
+            return EnergyInventorySlot.drainExtractCheck(this, itemstack);
         }
         return false;
     }
 
     @Override
-    public boolean isItemValidForSlot(int slotID, @Nonnull ItemStack itemstack) {
-        if (slotID == 0) {
-            return ChargeUtils.canBeCharged(itemstack);
-        }
-        return true;
-    }
-
-    @Override
     public boolean canOperate() {
-        return getEnergy() < getMaxEnergy() && seesSun && MekanismUtils.canFunction(this);
+        return seesSun && MekanismUtils.canFunction(this) && getEnergyContainer().getNeeded() > 0;
     }
 
     public double getProduction() {
@@ -188,17 +206,13 @@ public class TileEntitySolarGenerator extends TileEntityGenerator implements IMa
     }
 
     @Override
-    public boolean getEnergySlot() {
-        return inventory.get(0).isEmpty();
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.generators.client.model.ModelSolarGenerator.class;
     }
 
     @Override
-    public boolean getInputSlot() {
-        return false;
-    }
-
-    @Override
-    public boolean getOuputSlot() {
+    public boolean shouldApplyDefaultSelectionWireframeFacingRotation(IBlockState state, IBlockAccess world, BlockPos pos) {
         return false;
     }
 }

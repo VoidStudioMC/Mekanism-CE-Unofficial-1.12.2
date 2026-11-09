@@ -2,49 +2,65 @@ package mekanism.multiblockmachine.common.tile.generator;
 
 import com.google.common.base.Predicate;
 import io.netty.buffer.ByteBuf;
-import mekanism.api.Coord4D;
-import mekanism.api.TileNetworkList;
+import mekanism.api.*;
 import mekanism.common.Mekanism;
 import mekanism.common.Upgrade;
 import mekanism.common.base.IAdvancedBoundingBlock;
 import mekanism.common.base.IGuiProvider;
-import mekanism.common.base.IMachineSlotTip;
+import mekanism.common.base.ISpecialSelectionWireframeTile;
 import mekanism.common.base.IUpgradeTile;
+import mekanism.common.capabilities.Capabilities;
+import mekanism.common.capabilities.holder.slot.IInventorySlotHolder;
+import mekanism.common.capabilities.holder.slot.InventorySlotHelper;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.inventory.slot.EnergyInventorySlot;
+import mekanism.common.tile.TileEntityBoundingBlock;
 import mekanism.common.tile.component.TileComponentUpgrade;
-import mekanism.common.util.*;
+import mekanism.common.util.CableUtils;
+import mekanism.common.util.InventoryUtils;
+import mekanism.common.util.LangUtils;
+import mekanism.common.util.MekanismUtils;
 import mekanism.generators.common.tile.TileEntityGenerator;
 import mekanism.multiblockmachine.client.render.block.generator.bloom.BloomRenderLargeWindGenerator;
 import mekanism.multiblockmachine.common.MekanismMultiblockMachine;
+import mekanism.multiblockmachine.common.MultiblockMachineUpgrades;
 import net.minecraft.block.Block;
+import net.minecraft.block.state.IBlockState;
+import net.minecraft.client.Minecraft;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.DamageSource;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.EnumParticleTypes;
-import net.minecraft.util.math.AxisAlignedBB;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.ChunkPos;
-import net.minecraft.util.math.Vec3i;
+import net.minecraft.util.math.*;
+import net.minecraft.world.IBlockAccess;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraftforge.common.capabilities.Capability;
 import net.minecraftforge.energy.CapabilityEnergy;
 import net.minecraftforge.fml.common.FMLCommonHandler;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class TileEntityLargeWindGenerator extends TileEntityGenerator implements IAdvancedBoundingBlock, IMachineSlotTip, IUpgradeTile {
+public class TileEntityLargeWindGenerator extends TileEntityGenerator implements IAdvancedBoundingBlock, IUpgradeTile, ISpecialSelectionWireframeTile {
 
     public static final float SPEED = 32F;
     public static final float SPEED_SCALED = 256F / SPEED;
+    private static final int RENDER_BLADE_RADIUS = 21;
+    private static final int RENDER_BODY_HALF_WIDTH = 5;
+    private static final int RENDER_MIN_Y_OFFSET = -1;
+    private static final int RENDER_MAX_Y_OFFSET = 68;
+    private static final double SELECTION_WIREFRAME_ANGLE_STEP = 15D;
+    private static final int SELECTION_WIREFRAME_ANIMATION_STATES = 24;
     static final String[] methods = new String[]{"getEnergy", "getOutput", "getMaxEnergy", "getEnergyNeeded", "getMultiplier"};
     private double angle;
     private float currentMultiplier;
@@ -56,19 +72,27 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
     private boolean machineStop;
     private boolean machineStop2;
     private boolean bladeDamage;
+    private EnergyInventorySlot energySlot;
 
     public TileEntityLargeWindGenerator() {
         super("wind", "LargeWindGenerator", 0, 0);
-        upgradeComponent = new TileComponentUpgrade(this, 1, Upgrade.ENERGY);
-        upgradeComponent.setSupported(Upgrade.THREAD);
-        inventory = NonNullListSynchronized.withSize(2, ItemStack.EMPTY);
+        upgradeComponent = new TileComponentUpgrade(this, Upgrade.ENERGY);
+        setSupportedUpgrade(MultiblockMachineUpgrades.THREAD);
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IInventorySlotHolder getInitialInventory(IContentsListener listener) {
+        InventorySlotHelper builder = InventorySlotHelper.readOnly();
+        energySlot = builder.addSlot(EnergyInventorySlot.drain(this, listener, 143, 35));
+        return builder.build();
     }
 
 
     public int getThread() {
         int thread = 1;
-        if (upgradeComponent.isUpgradeInstalled(Upgrade.THREAD)) {
-            thread += upgradeComponent.getUpgrades(Upgrade.THREAD);
+        if (isUpgradeInstalled(MultiblockMachineUpgrades.THREAD)) {
+            thread += getInstalledUpgrades(MultiblockMachineUpgrades.THREAD);
         }
         return thread;
     }
@@ -85,17 +109,13 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
     @Override
     public void onAsyncUpdateServer() {
         super.onAsyncUpdateServer();
-        ChargeUtils.charge(0, this);
+        energySlot.drainContainer();
         // If we're in a blacklisted dimension, there's nothing more to do
         if (isBlacklistDimension) {
             return;
         }
-        if (ticker % 20 == 0) {
-            currentMultiplier = getMultiplier();
-            setActive(MekanismUtils.canFunction(this) && currentMultiplier > 0);
-        }
         if (getActive()) {
-            setEnergy(electricityStored.get() + getEnergyAdd());
+            getEnergyContainer().insert(getEnergyAdd(), Action.EXECUTE, AutomationType.INTERNAL);
         }
     }
 
@@ -106,6 +126,12 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
+        if (isBlacklistDimension) {
+            setActive(false);
+        } else if (ticker % 20 == 0) {
+            currentMultiplier = getMultiplier();
+            setActive(MekanismUtils.canFunction(this) && currentMultiplier > 0);
+        }
         if (ticker % 200 == 0 && MekanismConfig.current().multiblock.LargeWindGenerationRangeStops.val() && !machineStop2) {
             RangeStops();
         }
@@ -165,7 +191,19 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public void addTileSyncTask() {
-        CableUtils.emit(this, 4);
+        if (getEnergy() > 0) {
+            CableUtils.emit(this, 4);
+        }
+    }
+
+    @Override
+    protected boolean supportsAsyncIdleSkipping() {
+        return getClass() == TileEntityLargeWindGenerator.class;
+    }
+
+    @Override
+    protected boolean isAsyncUpdateIdle() {
+        return energySlot.isEmpty() && (isBlacklistDimension || !getActive() || getEnergyContainer().getNeeded() <= 0);
     }
 
 
@@ -300,10 +338,17 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
                 float maxG = (float) MekanismConfig.current().multiblock.LargeWindGenerationMax.val();
                 //Prevents the possibility of writing opposite values; https://github.com/Thorfusion/Mekanism-Community-Edition/issues/150
                 int rangeY = maxY < minY ? minY - maxY : maxY - minY;
+                if (rangeY <= 0 || minG <= 0 || Float.isNaN(minG) || Float.isInfinite(minG) || Float.isNaN(maxG) || Float.isInfinite(maxG)) {
+                    return 0;
+                }
                 float rangG = maxG < minG ? minG - maxG : maxG - minG;
                 float slope = rangG / rangeY;
                 float toGen = minG + (slope * (clampedY - minY));
-                return toGen / minG;
+                float multiplier = toGen / minG;
+                if (Float.isNaN(multiplier) || Float.isInfinite(multiplier)) {
+                    return 0;
+                }
+                return multiplier;
             }
         }
         return 0;
@@ -328,11 +373,86 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public boolean canOperate() {
-        return electricityStored.get() < getMaxEnergy() && getMultiplier() > 0 && MekanismUtils.canFunction(this);
+        return getEnergyContainer().getNeeded() > 0 && getMultiplier() > 0 && MekanismUtils.canFunction(this);
+    }
+
+    @Override
+    public void collectBoundingBlocks(java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
+        collectBoundingBlocks(getPos(), facing, consumer);
+    }
+
+    public static void collectBoundingBlocks(BlockPos origin, EnumFacing facing, java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
+        for (int x = -3; x <= 3; x++) {
+            for (int z = -3; z <= 3; z++) {
+                if (x != 0 || z != 0) {
+                    consumer.accept(origin.add(x, 0, z), true);
+                }
+            }
+        }
+        for (int x = -2; x <= 2; x++) {
+            for (int z = -2; z <= 2; z++) {
+                consumer.accept(origin.add(x, 1, z), false);
+            }
+        }
+        if (facing == EnumFacing.WEST || facing == EnumFacing.EAST) {
+            int x = facing == EnumFacing.WEST ? 3 : -3;
+            for (int z = -1; z <= 1; z++) {
+                consumer.accept(origin.add(x, 1, z), false);
+            }
+        } else if (facing == EnumFacing.NORTH || facing == EnumFacing.SOUTH) {
+            int z = facing == EnumFacing.NORTH ? 3 : -3;
+            for (int x = -1; x <= 1; x++) {
+                consumer.accept(origin.add(x, 1, z), false);
+            }
+        }
+        for (int y = 2; y <= 47; y++) {
+            for (int x = -2; x <= 2; x++) {
+                for (int z = -2; z <= 2; z++) {
+                    consumer.accept(origin.add(x, y, z), false);
+                }
+            }
+        }
+        for (int y = 43; y <= 47; y++) {
+            if (facing == EnumFacing.SOUTH || facing == EnumFacing.NORTH) {
+                int headMin = facing == EnumFacing.SOUTH ? -5 : 3;
+                int headMax = facing == EnumFacing.SOUTH ? -3 : 5;
+                int tailMin = facing == EnumFacing.SOUTH ? 3 : -4;
+                int tailMax = facing == EnumFacing.SOUTH ? 4 : -3;
+                for (int x = -2; x <= 2; x++) {
+                    for (int z = headMin; z <= headMax; z++) {
+                        consumer.accept(origin.add(x, y, z), false);
+                    }
+                    for (int z = tailMin; z <= tailMax; z++) {
+                        consumer.accept(origin.add(x, y, z), false);
+                    }
+                }
+            } else if (facing == EnumFacing.EAST || facing == EnumFacing.WEST) {
+                int headMin = facing == EnumFacing.EAST ? -5 : 3;
+                int headMax = facing == EnumFacing.EAST ? -3 : 5;
+                int tailMin = facing == EnumFacing.EAST ? 3 : -4;
+                int tailMax = facing == EnumFacing.EAST ? 4 : -3;
+                for (int z = -2; z <= 2; z++) {
+                    for (int x = headMin; x <= headMax; x++) {
+                        consumer.accept(origin.add(x, y, z), false);
+                    }
+                    for (int x = tailMin; x <= tailMax; x++) {
+                        consumer.accept(origin.add(x, y, z), false);
+                    }
+                }
+            }
+        }
+    }
+
+    @Override
+    public void onBoundingBlocksPlaced() {
+        isBlacklistDimension = MekanismConfig.current().generators.windGenerationDimBlacklist.val().contains(world.provider.getDimension());
     }
 
     @Override
     public void onPlace() {
+        if (tryPlaceBoundingBlocks(world, Coord4D.get(this)) != PlacementResult.LEGACY) {
+            return;
+        }
         //bottom
         for (int x = -3; x <= 3; x++) {
             for (int z = -3; z <= 3; z++) {
@@ -437,12 +557,12 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public double getMaxOutput() {
-        return (upgradeComponent.isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy()) * 2;
+        return (isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy()) * 2;
     }
 
     @Override
     public double getMaxEnergy() {
-        return upgradeComponent.isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy();
+        return isUpgradeInstalled(Upgrade.ENERGY) ? MekanismUtils.getMaxEnergy(this, getTierEnergy()) : getTierEnergy();
     }
 
     public double getTierEnergy() {
@@ -451,6 +571,9 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public void onBreak() {
+        if (removeBoundingBlocks(world, getPos())) {
+            return;
+        }
         for (int x = -3; x <= 3; x++) {
             for (int z = -3; z <= 3; z++) {
                 if (x == 0 && z == 0) {
@@ -596,27 +719,6 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
     }
 
     @Override
-    public boolean isItemValidForSlot(int slotID, @Nonnull ItemStack stack) {
-        return slotID == 0 && ChargeUtils.canBeCharged(stack);
-    }
-
-    @Override
-    public boolean getEnergySlot() {
-        return inventory.get(0).isEmpty();
-    }
-
-    @Override
-    public boolean getInputSlot() {
-        return false;
-    }
-
-    @Override
-    public boolean getOuputSlot() {
-        return false;
-    }
-
-
-    @Override
     public int getBlockGuiID(Block block, int metadata) {
         return 3;
     }
@@ -691,7 +793,9 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
         if (isOffsetCapabilityDisabled(capability, side, offset)) {
             return false;
         }
-        if (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
+        if (isManagedStrictEnergy(capability)) {
+            return getEnergyHandler(capability, side) != null;
+        } else if (capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
             return true;
         }
         return hasCapability(capability, side);
@@ -701,8 +805,8 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
     public @Nullable <T> T getOffsetCapability(@NotNull Capability<T> capability, @Nullable EnumFacing side, @NotNull Vec3i offset) {
         if (isOffsetCapabilityDisabled(capability, side, offset)) {
             return null;
-        } else if (isStrictEnergy(capability)) {
-            return (T) this;
+        } else if (isManagedStrictEnergy(capability)) {
+            return getEnergyHandler(capability, side);
         } else if (isTesla(capability, side)) {
             return (T) getTeslaEnergyWrapper(side);
         } else if (capability == CapabilityEnergy.ENERGY) {
@@ -713,7 +817,7 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public boolean isOffsetCapabilityDisabled(@NotNull Capability<?> capability, @Nullable EnumFacing side, @NotNull Vec3i offset) {
-        if (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
+        if (isManagedStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
             EnumFacing left = MekanismUtils.getLeft(facing);
             EnumFacing right = MekanismUtils.getRight(facing);
             if (offset.equals(new Vec3i(left.getXOffset() * 3, 0, left.getZOffset() * 3))) {
@@ -732,10 +836,14 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
 
     @Override
     public boolean isCapabilityDisabled(@Nonnull Capability<?> capability, EnumFacing side) {
-        if (isStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
+        if (isManagedStrictEnergy(capability) || capability == CapabilityEnergy.ENERGY || isTesla(capability, side)) {
             return true;
         }
         return super.isCapabilityDisabled(capability, side);
+    }
+
+    private boolean isManagedStrictEnergy(@Nonnull Capability<?> capability) {
+        return capability == Capabilities.STRICT_ENERGY_CAPABILITY || isStrictEnergy(capability);
     }
 
     @Override
@@ -749,14 +857,143 @@ public class TileEntityLargeWindGenerator extends TileEntityGenerator implements
         super.validate();
         if (isRemote()) {
             if (Mekanism.hooks.Bloom && MekanismConfig.current().client.enableBloom.val()) {
-                new BloomRenderLargeWindGenerator(this);
+                try {
+                    new BloomRenderLargeWindGenerator(this);
+                } catch (LinkageError e) {
+                    mekanism.common.util.BloomDependencyHelper.disableBloom("BloomRenderLargeWindGenerator", e);
+                }
             }
         }
     }
 
     @Override
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.multiblockmachine.client.model.generator.ModelLargeWindGenerator.class;
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public int getSelectionWireframeAnimationCacheKey(IBlockState state, IBlockAccess world, BlockPos pos) {
+        if (!MekanismConfig.current().client.windGeneratorRotating.val()) {
+            return 0;
+        }
+        return getSelectionWireframeAnimationState();
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public void applySelectionWireframeModelState(Object model, IBlockState state, IBlockAccess world, BlockPos pos) {
+        if (model instanceof mekanism.multiblockmachine.client.model.generator.ModelLargeWindGenerator windModel) {
+            windModel.applySelectionFanAngle(getSelectionWireframeAnimationState() * SELECTION_WIREFRAME_ANGLE_STEP);
+        }
+    }
+
+    @SideOnly(Side.CLIENT)
+    private int getSelectionWireframeAnimationState() {
+        return Math.floorMod((int) Math.round(getSelectionWireframeAngle() / SELECTION_WIREFRAME_ANGLE_STEP),
+                SELECTION_WIREFRAME_ANIMATION_STATES);
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public List<Vec3d> computeOcclusionSamplePoints() {
+        List<Vec3d> samplePoints = new ArrayList<>(super.computeOcclusionSamplePoints());
+        World world = getWorld();
+        if (world == null) {
+            return samplePoints;
+        }
+        EnumFacing direction = facing == null ? EnumFacing.NORTH : facing;
+        EnumFacing left = MekanismUtils.getLeft(direction);
+        EnumFacing right = MekanismUtils.getRight(direction);
+        EnumFacing back = direction.getOpposite();
+
+        // Keep the renderer alive when only the upper structure/head-tail bounding blocks are visible.
+        addUpperBoundingProbePoints(world, samplePoints, getPos().up(47));
+        addUpperBoundingProbePoints(world, samplePoints, getPos().up(47).offset(left, 2));
+        addUpperBoundingProbePoints(world, samplePoints, getPos().up(47).offset(right, 2));
+        addUpperBoundingProbePoints(world, samplePoints, getPos().up(47).offset(direction, 2));
+        addUpperBoundingProbePoints(world, samplePoints, getPos().up(47).offset(back, 2));
+
+        BlockPos headCenter = getPos().up(46).offset(direction, 4);
+        BlockPos tailCenter = getPos().up(46).offset(back, 3);
+        addUpperBoundingProbePoints(world, samplePoints, headCenter);
+        addUpperBoundingProbePoints(world, samplePoints, headCenter.offset(left, 2));
+        addUpperBoundingProbePoints(world, samplePoints, headCenter.offset(right, 2));
+        addUpperBoundingProbePoints(world, samplePoints, headCenter.offset(direction, 1));
+        addUpperBoundingProbePoints(world, samplePoints, tailCenter);
+        addUpperBoundingProbePoints(world, samplePoints, tailCenter.offset(left, 2));
+        addUpperBoundingProbePoints(world, samplePoints, tailCenter.offset(right, 2));
+        addUpperBoundingProbePoints(world, samplePoints, tailCenter.offset(back, 1));
+
+        // The rotating fan extends far beyond the tower/head bounding blocks.
+        samplePoints.addAll(cullingGetAabbOcclusionSamplePoints(getRenderBoundingBox()));
+
+        return samplePoints;
+    }
+
+    @SideOnly(Side.CLIENT)
+    private void addUpperBoundingProbePoints(World world, List<Vec3d> samplePoints, BlockPos blockPos) {
+        TileEntity tileEntity = world.getTileEntity(blockPos);
+        if (!(tileEntity instanceof TileEntityBoundingBlock boundingBlock) || !getPos().equals(boundingBlock.getMainPos())) {
+            return;
+        }
+        double x = blockPos.getX();
+        double y = blockPos.getY();
+        double z = blockPos.getZ();
+        samplePoints.add(new Vec3d(x + 0.5D, y + 0.5D, z + 0.5D));
+
+        double min = 0.08D;
+        double max = 0.92D;
+        samplePoints.add(new Vec3d(x + min, y + min, z + min));
+        samplePoints.add(new Vec3d(x + min, y + min, z + max));
+        samplePoints.add(new Vec3d(x + min, y + max, z + min));
+        samplePoints.add(new Vec3d(x + min, y + max, z + max));
+        samplePoints.add(new Vec3d(x + max, y + min, z + min));
+        samplePoints.add(new Vec3d(x + max, y + min, z + max));
+        samplePoints.add(new Vec3d(x + max, y + max, z + min));
+        samplePoints.add(new Vec3d(x + max, y + max, z + max));
+    }
+
+    @SideOnly(Side.CLIENT)
+    private double getSelectionWireframeAngle() {
+        double angle = getAngle();
+        if (getActive()) {
+            float partial = Minecraft.getMinecraft().getRenderPartialTicks();
+            angle = (angle + ((getPos().getY() + 46F) / SPEED_SCALED) * partial) % 360D;
+        }
+        return angle < 0D ? angle + 360D : angle;
+    }
+
+    @Nonnull
+    @Override
+    @SideOnly(Side.CLIENT)
+    public AxisAlignedBB getRenderBoundingBox() {
+        return getRenderBoundingBox(getPos(), facing);
+    }
+
+    static AxisAlignedBB getRenderBoundingBox(BlockPos pos, @Nullable EnumFacing facing) {
+        EnumFacing direction = facing == null ? EnumFacing.NORTH : facing;
+        if (direction == EnumFacing.EAST || direction == EnumFacing.WEST) {
+            return createRenderBoundingBox(pos, RENDER_BODY_HALF_WIDTH, RENDER_BLADE_RADIUS);
+        }
+        return createRenderBoundingBox(pos, RENDER_BLADE_RADIUS, RENDER_BODY_HALF_WIDTH);
+    }
+
+    private static AxisAlignedBB createRenderBoundingBox(BlockPos pos, int xRadius, int zRadius) {
+        return new AxisAlignedBB(
+                pos.getX() - xRadius,
+                pos.getY() + RENDER_MIN_Y_OFFSET,
+                pos.getZ() - zRadius,
+                pos.getX() + xRadius + 1,
+                pos.getY() + RENDER_MAX_Y_OFFSET,
+                pos.getZ() + zRadius + 1
+        );
+    }
+
+    @Override
     public boolean hasFastRenderer() {
-        return true;
+        return false;
     }
 
 }

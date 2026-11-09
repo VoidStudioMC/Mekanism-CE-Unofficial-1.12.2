@@ -5,9 +5,13 @@ import mekanism.api.IEvaporationSolar;
 import mekanism.common.base.IBoundingBlock;
 import mekanism.common.capabilities.Capabilities;
 import mekanism.common.config.MekanismConfig;
-import mekanism.common.util.MekanismUtils;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.util.EnumFacing;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.IBlockAccess;
 import net.minecraftforge.common.capabilities.Capability;
+import net.minecraftforge.fml.relauncher.Side;
+import net.minecraftforge.fml.relauncher.SideOnly;
 
 import javax.annotation.Nonnull;
 
@@ -28,26 +32,24 @@ public class TileEntityAdvancedSolarGenerator extends TileEntitySolarGenerator i
     }
 
     @Override
-    public void onPlace() {
-        Coord4D current = Coord4D.get(this);
-        MekanismUtils.makeBoundingBlock(world, getPos().add(0, 1, 0), current);
+    public void collectBoundingBlocks(java.util.function.BiConsumer<BlockPos, Boolean> consumer) {
+        consumer.accept(getPos().up(), false);
         for (int x = -1; x <= 1; x++) {
             for (int z = -1; z <= 1; z++) {
-                MekanismUtils.makeBoundingBlock(world, getPos().add(x, 2, z), current);
+                consumer.accept(getPos().add(x, 2, z), false);
             }
         }
     }
 
     @Override
+    public void onPlace() {
+        tryPlaceBoundingBlocks(world, Coord4D.get(this));
+    }
+
+    @Override
     public void onBreak() {
-        world.setBlockToAir(getPos().add(0, 1, 0));
-        for (int x = -1; x <= 1; x++) {
-            for (int z = -1; z <= 1; z++) {
-                world.setBlockToAir(getPos().add(x, 2, z));
-            }
-        }
+        removeBoundingBlocks(world, getPos());
         invalidate();
-        world.setBlockToAir(getPos());
     }
 
     @Override
@@ -66,6 +68,17 @@ public class TileEntityAdvancedSolarGenerator extends TileEntitySolarGenerator i
     @Override
     protected boolean canSeeSky() {
         return world.canSeeSky(getPos().up(3));
+    }
+
+    @Override
+    @SideOnly(Side.CLIENT)
+    public Class<?> getSelectionWireframeModelClass() {
+        return mekanism.generators.client.model.ModelAdvancedSolarGenerator.class;
+    }
+
+    @Override
+    public boolean shouldApplyDefaultSelectionWireframeFacingRotation(IBlockState state, IBlockAccess world, BlockPos pos) {
+        return true;
     }
 
 

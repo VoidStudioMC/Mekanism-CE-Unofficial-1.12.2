@@ -6,7 +6,6 @@ import ic2.api.energy.tile.IEnergySink;
 import ic2.api.energy.tile.IEnergyTile;
 import mekanism.api.Coord4D;
 import mekanism.api.energy.IStrictEnergyAcceptor;
-import mekanism.common.Mekanism;
 import mekanism.common.capabilities.Capabilities;
 import mekanism.common.integration.fluxnetworks.FluxPlugAcceptor;
 import mekanism.common.integration.forgeenergy.ForgeEnergyIntegration;
@@ -95,12 +94,26 @@ public abstract class EnergyAcceptorWrapper implements IStrictEnergyAcceptor {
 
     public abstract boolean needsEnergy(EnumFacing side);
 
+    /**
+     * Unknown integrations never receive a persistent resolution token.
+     */
+    @Nullable
+    public Object managedCacheToken(TileEntity tile, EnumFacing side) {
+        return null;
+    }
+
     public static class MekanismAcceptor extends EnergyAcceptorWrapper {
 
         private IStrictEnergyAcceptor acceptor;
 
         public MekanismAcceptor(IStrictEnergyAcceptor mekAcceptor) {
             acceptor = mekAcceptor;
+        }
+
+        @Override
+        public Object managedCacheToken(TileEntity tile, EnumFacing side) {
+            return getClass() == MekanismAcceptor.class && tile instanceof mekanism.common.tile.prefab.TileEntityContainerBlock container ?
+                    container.getManagedEnergyAcceptorToken(side, acceptor) : null;
         }
 
         @Override
@@ -153,16 +166,8 @@ public abstract class EnergyAcceptorWrapper implements IStrictEnergyAcceptor {
 
         @Override
         public double acceptEnergy(EnumFacing side, double amount, boolean simulate) {
-            double toTransfer = Math.min(acceptor.getDemandedEnergy(), IC2Integration.toEU(amount));
-            if (simulate) {
-                //IC2 has no built in way to simulate, so we have to calculate it ourselves
-                return IC2Integration.fromEU(toTransfer);
-            }
-            if(Mekanism.hooks.IC2CLoaded) {
-                toTransfer = Math.min(toTransfer, EnergyNet.instance.getPowerFromTier(acceptor.getSinkTier()));
-            }
-            double rejects = acceptor.injectEnergy(side, toTransfer, 0);
-            return IC2Integration.fromEU(toTransfer - rejects);
+            double accepted = IC2Integration.transferToSink(acceptor, side, IC2Integration.toEU(amount), simulate);
+            return IC2Integration.fromEU(accepted);
         }
 
         @Override

@@ -3,14 +3,15 @@ package mekanism.common.item;
 import mekanism.api.EnumColor;
 import mekanism.api.IIncrementalEnum;
 import mekanism.api.NBTConstants;
-import mekanism.api.gas.Gas;
 import mekanism.api.gas.GasStack;
-import mekanism.api.gas.IGasItem;
 import mekanism.api.math.MathUtils;
-import mekanism.client.render.MekanismRenderer;
 import mekanism.common.MekanismFluids;
+import mekanism.common.capabilities.ItemCapabilityWrapper;
+import mekanism.common.capabilities.gas.item.RateLimitGasHandler;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.inventory.slot.gas.GasInventorySlot;
 import mekanism.common.item.interfaces.IItemHUDProvider;
+import mekanism.common.item.interfaces.ILegacyGasItem;
 import mekanism.common.item.interfaces.IModeItem;
 import mekanism.common.util.ItemDataUtils;
 import mekanism.common.util.LangUtils;
@@ -28,6 +29,7 @@ import net.minecraft.util.text.ITextComponent;
 import net.minecraft.util.text.TextComponentTranslation;
 import net.minecraft.util.text.TextFormatting;
 import net.minecraft.world.World;
+import net.minecraftforge.common.capabilities.ICapabilityProvider;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
 import org.jetbrains.annotations.NotNull;
@@ -35,7 +37,7 @@ import org.jetbrains.annotations.NotNull;
 import javax.annotation.Nonnull;
 import java.util.List;
 
-public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeItem, IItemHUDProvider {
+public class ItemFlamethrower extends ItemMekanism implements ILegacyGasItem, IModeItem, IItemHUDProvider {
 
     public int TRANSFER_RATE = 16;
 
@@ -48,7 +50,7 @@ public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeIte
     @Override
     @SideOnly(Side.CLIENT)
     public void addInformation(ItemStack itemstack, World world, List<String> list, ITooltipFlag flag) {
-        GasStack gasStack = getGas(itemstack);
+        GasStack gasStack = getStoredGas(itemstack);
         if (gasStack == null) {
             list.add(LangUtils.localize("tooltip.noGas") + ".");
         } else {
@@ -58,52 +60,34 @@ public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeIte
     }
 
     public void useGas(ItemStack stack) {
-        GasStack gas = getGas(stack);
-        if (gas != null) {
-            setGas(stack, new GasStack(gas.getGas(), gas.amount - 1));
-        }
+        useGas(stack, 1);
     }
 
-    @Override
-    public int getMaxGas(ItemStack itemstack) {
+    public GasStack useGas(ItemStack stack, int amount) {
+        return GasInventorySlot.useGas(stack, MekanismFluids.Hydrogen, amount);
+    }
+
+    public boolean hasGas(ItemStack stack) {
+        GasStack stored = getContainedGas(stack);
+        return stored != null && stored.amount > 0;
+    }
+
+    public GasStack getContainedGas(ItemStack stack) {
+        GasStack stored = getStoredGas(stack);
+        return stored != null && stored.getGas() == MekanismFluids.Hydrogen ? stored : null;
+    }
+
+    private int getGasCapacity(ItemStack itemstack) {
         return MekanismConfig.current().general.maxFlamethrowerGas.val();
     }
 
-    @Override
-    public int getRate(ItemStack itemstack) {
+    private int getGasTransferRate(ItemStack itemstack) {
         return TRANSFER_RATE;
     }
 
-    @Override
-    public int addGas(ItemStack itemstack, GasStack stack) {
-        if (getGas(itemstack) != null && getGas(itemstack).getGas() != stack.getGas()) {
-            return 0;
-        }
-        if (stack.getGas() != MekanismFluids.Hydrogen) {
-            return 0;
-        }
-        int toUse = Math.min(getMaxGas(itemstack) - getStored(itemstack), Math.min(getRate(itemstack), stack.amount));
-        setGas(itemstack, new GasStack(stack.getGas(), getStored(itemstack) + toUse));
-        return toUse;
-    }
-
-    @Override
-    public GasStack removeGas(ItemStack itemstack, int amount) {
-        return null;
-    }
-
     public int getStored(ItemStack itemstack) {
-        return getGas(itemstack) != null ? getGas(itemstack).amount : 0;
-    }
-
-    @Override
-    public boolean canReceiveGas(ItemStack itemstack, Gas type) {
-        return type == MekanismFluids.Hydrogen;
-    }
-
-    @Override
-    public boolean canProvideGas(ItemStack itemstack, Gas type) {
-        return false;
+        GasStack gas = getStoredGas(itemstack);
+        return gas == null ? 0 : gas.amount;
     }
 
     @Override
@@ -113,39 +97,41 @@ public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeIte
 
     @Override
     public double getDurabilityForDisplay(ItemStack stack) {
-        return 1D - ((getGas(stack) != null ? (double) getGas(stack).amount : 0D) / (double) getMaxGas(stack));
+        GasStack gas = getStoredGas(stack);
+        return 1D - ((gas != null ? (double) gas.amount : 0D) / (double) getGasCapacity(stack));
     }
 
     @Override
     public int getRGBDurabilityForDisplay(@Nonnull ItemStack stack) {
-        GasStack gas = getGas(stack);
+        GasStack gas = getStoredGas(stack);
         if (gas != null) {
-            MekanismRenderer.color(gas);
             return gas.getGas().getTint();
         } else {
             return MathHelper.hsvToRGB(Math.max(0.0F, (float) (1 - getDurabilityForDisplay(stack))) / 3.0F, 1.0F, 1.0F);
         }
     }
 
-    @Override
-    public GasStack getGas(ItemStack itemstack) {
-        return GasStack.readFromNBT(ItemDataUtils.getCompound(itemstack, "stored"));
+    private GasStack getStoredGas(ItemStack itemstack) {
+        return GasInventorySlot.getStoredGas(itemstack, "stored");
+    }
+
+    private void setStoredGas(ItemStack itemstack, GasStack stack) {
+        if (stack != null && stack.getGas() != null && stack.getGas() != MekanismFluids.Hydrogen) {
+            return;
+        }
+        GasInventorySlot.setStoredGas(itemstack, stack, "stored", getGasCapacity(itemstack));
     }
 
     @Override
-    public void setGas(ItemStack itemstack, GasStack stack) {
-        if (stack == null || stack.amount == 0) {
-            ItemDataUtils.removeData(itemstack, "stored");
-        } else {
-            int amount = Math.max(0, Math.min(stack.amount, getMaxGas(itemstack)));
-            GasStack gasStack = new GasStack(stack.getGas(), amount);
-            ItemDataUtils.setCompound(itemstack, "stored", gasStack.write(new NBTTagCompound()));
-        }
+    public ICapabilityProvider initCapabilities(ItemStack stack, NBTTagCompound nbt) {
+        return new ItemCapabilityWrapper(stack, RateLimitGasHandler.create(() -> getGasTransferRate(stack), () -> getGasCapacity(stack),
+                mekanism.api.functions.ConstantPredicates.notExternal(), mekanism.api.functions.ConstantPredicates.alwaysTrueBi(),
+                gasStack -> gasStack != null && gasStack.getGas() == MekanismFluids.Hydrogen, "stored"));
     }
 
     public ItemStack getEmptyItem() {
         ItemStack empty = new ItemStack(this);
-        setGas(empty, null);
+        setStoredGas(empty, null);
         return empty;
     }
 
@@ -155,11 +141,11 @@ public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeIte
             return;
         }
         ItemStack empty = new ItemStack(this);
-        setGas(empty, null);
+        setStoredGas(empty, null);
         list.add(empty);
 
         ItemStack filled = new ItemStack(this);
-        setGas(filled, new GasStack(MekanismFluids.Hydrogen, ((IGasItem) filled.getItem()).getMaxGas(filled)));
+        setStoredGas(filled, new GasStack(MekanismFluids.Hydrogen, getGasCapacity(filled)));
         list.add(filled);
     }
 
@@ -175,9 +161,10 @@ public class ItemFlamethrower extends ItemMekanism implements IGasItem, IModeIte
 
     @Override
     public void addHUDStrings(List<String> list, EntityPlayer player, ItemStack stack, EntityEquipmentSlot slotType) {
+        int stored = getStored(stack);
         list.add(LangUtils.localize("tooltip.flamethrower.mode") + " " + getMode(stack).getName());
-        if (getStored(stack) > 0) {
-            list.add(LangUtils.localize("tooltip.flamethrower.stored") + " " + EnumColor.ORANGE + getStored(stack));
+        if (stored > 0) {
+            list.add(LangUtils.localize("tooltip.flamethrower.stored") + " " + EnumColor.ORANGE + stored);
         } else {
             list.add(LangUtils.localize("tooltip.flamethrower.stored") + " " + EnumColor.ORANGE + LangUtils.localize("tooltip.noGas"));
         }

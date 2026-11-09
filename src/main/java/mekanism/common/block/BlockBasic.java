@@ -2,7 +2,6 @@ package mekanism.common.block;
 
 import mekanism.api.Coord4D;
 import mekanism.api.IMekWrench;
-import mekanism.api.energy.IEnergizedItem;
 import mekanism.api.energy.IStrictEnergyStorage;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IActiveState;
@@ -13,10 +12,9 @@ import mekanism.common.block.states.BlockStateBasic;
 import mekanism.common.block.states.BlockStateBasic.BasicBlock;
 import mekanism.common.block.states.BlockStateBasic.BasicBlockType;
 import mekanism.common.block.states.BlockStateFacing;
-import mekanism.common.content.boiler.SynchronizedBoilerData;
-import mekanism.common.content.tank.TankUpdateProtocol;
+import mekanism.common.content.tank.DynamicFluidTank;
 import mekanism.common.integration.wrenches.Wrenches;
-import mekanism.common.inventory.InventoryBin;
+import mekanism.common.inventory.BinMekanismInventory;
 import mekanism.common.item.ItemBlockBasic;
 import mekanism.common.multiblock.IMultiblock;
 import mekanism.common.multiblock.IStructuralMultiblock;
@@ -26,12 +24,8 @@ import mekanism.common.tile.TileEntitySecurityDesk;
 import mekanism.common.tile.TileEntitySuperheatingElement;
 import mekanism.common.tile.multiblock.*;
 import mekanism.common.tile.prefab.TileEntityBasicBlock;
-import mekanism.common.util.FluidContainerUtils;
-import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.SecurityUtils;
-import mekanism.common.util.StackUtils;
+import mekanism.common.util.*;
 import net.minecraft.block.Block;
-import net.minecraft.block.BlockFire;
 import net.minecraft.block.material.Material;
 import net.minecraft.block.properties.PropertyEnum;
 import net.minecraft.block.state.BlockStateContainer;
@@ -55,9 +49,6 @@ import net.minecraft.world.EnumSkyBlock;
 import net.minecraft.world.Explosion;
 import net.minecraft.world.IBlockAccess;
 import net.minecraft.world.World;
-import net.minecraftforge.fluids.FluidStack;
-import net.minecraftforge.fluids.FluidUtil;
-import net.minecraftforge.fluids.capability.IFluidHandlerItem;
 import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.relauncher.Side;
 import net.minecraftforge.fml.relauncher.SideOnly;
@@ -96,75 +87,8 @@ public abstract class BlockBasic extends BlockTileDrops {
         if (tileEntity.structure == null) {
             return false;
         }
-
-        ItemStack copyStack = StackUtils.size(itemStack, 1);
-        if (FluidContainerUtils.isFluidContainer(itemStack)) {
-            IFluidHandlerItem handler = FluidUtil.getFluidHandler(copyStack);
-            if (FluidUtil.getFluidContained(copyStack) == null) {
-                if (tileEntity.structure.fluidStored != null) {
-                    int filled = handler.fill(tileEntity.structure.fluidStored, !player.capabilities.isCreativeMode);
-                    copyStack = handler.getContainer();
-                    if (filled > 0) {
-                        if (player.capabilities.isCreativeMode) {
-                            tileEntity.structure.fluidStored.amount -= filled;
-                        } else if (itemStack.getCount() == 1) {
-                            tileEntity.structure.fluidStored.amount -= filled;
-                            player.setHeldItem(hand, copyStack);
-                        } else if (itemStack.getCount() > 1 && player.inventory.addItemStackToInventory(copyStack)) {
-                            tileEntity.structure.fluidStored.amount -= filled;
-                            itemStack.shrink(1);
-                        }
-                        if (tileEntity.structure.fluidStored.amount == 0) {
-                            tileEntity.structure.fluidStored = null;
-                        }
-                        return true;
-                    }
-                }
-            } else {
-                FluidStack itemFluid = FluidUtil.getFluidContained(copyStack);
-                int stored = tileEntity.structure.fluidStored != null ? tileEntity.structure.fluidStored.amount : 0;
-                int needed = (tileEntity.structure.volume * TankUpdateProtocol.FLUID_PER_TANK) - stored;
-                if (tileEntity.structure.fluidStored != null && !tileEntity.structure.fluidStored.isFluidEqual(itemFluid)) {
-                    return false;
-                }
-                boolean filled = false;
-                FluidStack drained = handler.drain(needed, !player.capabilities.isCreativeMode);
-                copyStack = handler.getContainer();
-
-                if (copyStack.getCount() == 0) {
-                    copyStack = ItemStack.EMPTY;
-                }
-                if (drained != null) {
-                    if (player.capabilities.isCreativeMode) {
-                        filled = true;
-                    } else if (!copyStack.isEmpty()) {
-                        if (itemStack.getCount() == 1) {
-                            player.setHeldItem(hand, copyStack);
-                            filled = true;
-                        } else if (player.inventory.addItemStackToInventory(copyStack)) {
-                            itemStack.shrink(1);
-                            filled = true;
-                        }
-                    } else {
-                        itemStack.shrink(1);
-                        if (itemStack.getCount() == 0) {
-                            player.setHeldItem(hand, ItemStack.EMPTY);
-                        }
-                        filled = true;
-                    }
-
-                    if (filled) {
-                        if (tileEntity.structure.fluidStored == null) {
-                            tileEntity.structure.fluidStored = drained;
-                        } else {
-                            tileEntity.structure.fluidStored.amount += drained.amount;
-                        }
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+        DynamicFluidTank fluidTank = tileEntity.structure.inventoryFluidTank;
+        return FluidUtils.handleTankInteraction(player, hand, itemStack, fluidTank, true, false);
     }
 
     public abstract BasicBlock getBasicBlock();
@@ -212,17 +136,13 @@ public abstract class BlockBasic extends BlockTileDrops {
             state = state.withProperty(BlockStateBasic.activeProperty, port.mode);
         }
         if (tile instanceof TileEntitySuperheatingElement element) {
-            boolean active = false;
-            if (element.multiblockUUID != null && SynchronizedBoilerData.clientHotMap.get(element.multiblockUUID) != null) {
-                active = SynchronizedBoilerData.clientHotMap.get(element.multiblockUUID);
-            }
-            state = state.withProperty(BlockStateBasic.activeProperty, active);
+            state = state.withProperty(BlockStateBasic.activeProperty, element.getActive());
         }
         if (tile instanceof TileEntityDynamicValve Valve) {
             state = state.withProperty(BlockStateBasic.activeProperty, Valve.eject);
         }
         if (tile instanceof TileEntityBoilerValve Valve) {
-            state = state.withProperty(BlockStateBasic.activeProperty, Valve.Eject);
+            state = state.withProperty(BlockStateBasic.boilerValveModeProperty, Valve.getRenderMode());
         }
         return state;
     }
@@ -541,10 +461,7 @@ public abstract class BlockBasic extends BlockTileDrops {
             }
         } else if (getBasicBlock() == BasicBlock.BASIC_BLOCK_2) {
             if (metadata == 5 && tileEntity instanceof TileEntitySuperheatingElement element) {
-                if (element.multiblockUUID != null && SynchronizedBoilerData.clientHotMap.get(element.multiblockUUID) != null) {
-                    return SynchronizedBoilerData.clientHotMap.get(element.multiblockUUID) ? 15 : 0;
-                }
-                return 0;
+                return element.getActive() ? 15 : 0;
             }
         }
 
@@ -570,34 +487,44 @@ public abstract class BlockBasic extends BlockTileDrops {
         TileEntity te = world.getTileEntity(pos);
         if (te instanceof TileEntityBasicBlock tileEntity) {
             EnumFacing change = EnumFacing.SOUTH;
-            if (tileEntity.canSetFacing(EnumFacing.DOWN) && tileEntity.canSetFacing(EnumFacing.UP)) {
-                int height = Math.round(placer.rotationPitch);
-                if (height >= 65) {
-                    change = EnumFacing.UP;
-                } else if (height <= -65) {
-                    change = EnumFacing.DOWN;
+            if (placer != null) {
+                if (tileEntity.canSetFacing(EnumFacing.DOWN) && tileEntity.canSetFacing(EnumFacing.UP)) {
+                    int height = Math.round(placer.rotationPitch);
+                    if (height >= 65) {
+                        change = EnumFacing.UP;
+                    } else if (height <= -65) {
+                        change = EnumFacing.DOWN;
+                    }
                 }
-            }
-            if (change != EnumFacing.DOWN && change != EnumFacing.UP) {
-                int side = MathHelper.floor((placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
-                change = switch (side) {
-                    case 0 -> EnumFacing.NORTH;
-                    case 1 -> EnumFacing.EAST;
-                    case 2 -> EnumFacing.SOUTH;
-                    case 3 -> EnumFacing.WEST;
-                    default -> change;
-                };
+                if (change != EnumFacing.DOWN && change != EnumFacing.UP) {
+                    int side = MathHelper.floor((placer.rotationYaw * 4.0F / 360.0F) + 0.5D) & 3;
+                    change = switch (side) {
+                        case 0 -> EnumFacing.NORTH;
+                        case 1 -> EnumFacing.EAST;
+                        case 2 -> EnumFacing.SOUTH;
+                        case 3 -> EnumFacing.WEST;
+                        default -> change;
+                    };
+                }
             }
             tileEntity.setFacing(change);
             tileEntity.redstone = world.getRedstonePowerFromNeighbors(pos) > 0;
 
-            if (tileEntity instanceof TileEntitySecurityDesk desk) {
+            if (placer != null && tileEntity instanceof TileEntitySecurityDesk desk) {
                 desk.ownerUUID = placer.getUniqueID();
             }
             if (tileEntity instanceof IBoundingBlock block) {
-                block.onPlace();
+                IBoundingBlock.PlacementResult result = block.tryPlaceBoundingBlocks(world, Coord4D.get(tileEntity));
+                if (result == IBoundingBlock.PlacementResult.LEGACY) {
+                    block.onPlace();
+                } else if (result == IBoundingBlock.PlacementResult.BLOCKED) {
+                    world.setBlockToAir(pos);
+                    return;
+                }
             }
         }
+
+        MekanismPlacementData.apply(world, pos, placer, stack);
 
         world.markBlockRangeForRenderUpdate(pos, pos.add(1, 1, 1));
         world.checkLightFor(EnumSkyBlock.BLOCK, pos);
@@ -617,7 +544,9 @@ public abstract class BlockBasic extends BlockTileDrops {
     public void breakBlock(@Nonnull World world, @Nonnull BlockPos pos, @Nonnull IBlockState state) {
         TileEntity tileEntity = world.getTileEntity(pos);
         if (tileEntity instanceof IBoundingBlock block) {
-            block.onBreak();
+            if (!block.removeBoundingBlocks(world, pos)) {
+                block.onBreak();
+            }
         }
         super.breakBlock(world, pos, state);
     }
@@ -630,11 +559,14 @@ public abstract class BlockBasic extends BlockTileDrops {
 
         if (type == BasicBlockType.BIN) {
             TileEntityBin tileEntity = (TileEntityBin) world.getTileEntity(pos);
-            InventoryBin inv = new InventoryBin(ret);
             ((ITierItem) ret.getItem()).setBaseTier(ret, tileEntity.tier.getBaseTier());
-            inv.setItemCount(tileEntity.getItemCount());
-            if (tileEntity.getItemCount() > 0) {
-                inv.setItemType(tileEntity.itemType);
+            BinMekanismInventory inventory = BinMekanismInventory.create(ret);
+            if (inventory != null) {
+                inventory.setItemCount(tileEntity.getItemCount());
+                if (tileEntity.getItemCount() > 0) {
+                    inventory.setItemType(tileEntity.itemType);
+                }
+                inventory.setLockStack(tileEntity.getLockStack());
             }
         } else if (type == BasicBlockType.INDUCTION_CELL) {
             TileEntityInductionCell tileEntity = (TileEntityInductionCell) world.getTileEntity(pos);
@@ -646,8 +578,7 @@ public abstract class BlockBasic extends BlockTileDrops {
 
         TileEntity tileEntity = world.getTileEntity(pos);
         if (tileEntity instanceof IStrictEnergyStorage energyStorage) {
-            IEnergizedItem energizedItem = (IEnergizedItem) ret.getItem();
-            energizedItem.setEnergy(ret, energyStorage.getEnergy());
+            StorageUtils.setStoredEnergy(ret, energyStorage.getEnergy(), energyStorage.getMaxEnergy());
         }
         return ret;
     }
@@ -709,8 +640,8 @@ public abstract class BlockBasic extends BlockTileDrops {
         BasicBlockType basicBlockType = BasicBlockType.get(blockState);
         if (basicBlockType != null && basicBlockType.hasRedstoneOutput) {
             TileEntity tile = worldIn.getTileEntity(pos);
-            if (tile instanceof IComparatorSupport support) {
-                return support.getRedstoneLevel();
+            if (tile instanceof IComparatorSupport support && support.supportsComparator()) {
+                return support.getCurrentRedstoneLevel();
             }
         }
         return 0;

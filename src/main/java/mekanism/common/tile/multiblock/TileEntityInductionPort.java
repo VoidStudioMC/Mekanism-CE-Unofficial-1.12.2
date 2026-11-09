@@ -1,31 +1,30 @@
 package mekanism.common.tile.multiblock;
 
-import ic2.api.energy.EnergyNet;
 import ic2.api.energy.event.EnergyTileLoadEvent;
 import ic2.api.energy.event.EnergyTileUnloadEvent;
 import ic2.api.energy.tile.IEnergyAcceptor;
 import ic2.api.energy.tile.IEnergyConductor;
 import ic2.api.energy.tile.IEnergyEmitter;
-import ic2.api.energy.tile.IEnergyTile;
 import io.netty.buffer.ByteBuf;
-import mekanism.api.Coord4D;
-import mekanism.api.EnumColor;
-import mekanism.api.IConfigurable;
-import mekanism.api.TileNetworkList;
+import mekanism.api.*;
 import mekanism.common.Mekanism;
 import mekanism.common.base.IActiveState;
 import mekanism.common.base.IComparatorSupport;
 import mekanism.common.base.IEnergyWrapper;
 import mekanism.common.capabilities.Capabilities;
 import mekanism.common.capabilities.CapabilityWrapperManager;
+import mekanism.common.capabilities.holder.energy.IEnergyContainerHolder;
+import mekanism.common.capabilities.holder.energy.ProxiedEnergyContainerHolder;
 import mekanism.common.integration.MekanismHooks;
 import mekanism.common.integration.forgeenergy.ForgeEnergyIntegration;
 import mekanism.common.integration.ic2.IC2Integration;
 import mekanism.common.integration.redstoneflux.RFIntegration;
 import mekanism.common.integration.tesla.TeslaIntegration;
-import mekanism.common.util.*;
+import mekanism.common.util.CableUtils;
+import mekanism.common.util.CapabilityUtils;
+import mekanism.common.util.LangUtils;
+import mekanism.common.util.MekanismUtils;
 import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.EnumActionResult;
@@ -38,19 +37,18 @@ import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.Optional.Interface;
 import net.minecraftforge.fml.common.Optional.InterfaceList;
 import net.minecraftforge.fml.common.Optional.Method;
-import net.minecraftforge.items.CapabilityItemHandler;
 
 import javax.annotation.Nonnull;
+import java.util.Collections;
 
 @InterfaceList({
         @Interface(iface = "ic2.api.energy.tile.IEnergySink", modid = MekanismHooks.IC2_MOD_ID),
         @Interface(iface = "ic2.api.energy.tile.IEnergySource", modid = MekanismHooks.IC2_MOD_ID),
         @Interface(iface = "ic2.api.tile.IEnergyStorage", modid = MekanismHooks.IC2_MOD_ID)
 })
-public class TileEntityInductionPort extends TileEntityInductionCasing implements IEnergyWrapper, IConfigurable, IActiveState, IComparatorSupport {
+public class TileEntityInductionPort extends TileEntityInductionCasing implements mekanism.common.integration.ic2.IEnergyInIC2OutputWrapper, IConfigurable, IActiveState, IComparatorSupport, mekanism.common.base.IWholeEnergyTransfer {
 
     private boolean ic2Registered = false;
-    private int currentRedstoneLevel;
 
     /**
      * false = input, true = output
@@ -61,6 +59,16 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
 
     public TileEntityInductionPort() {
         super("InductionPort");
+        initializeInventorySlots();
+    }
+
+    @Override
+    protected IEnergyContainerHolder getInitialEnergyContainers(IContentsListener listener) {
+        return ProxiedEnergyContainerHolder.create(
+                side -> side != null && sideIsConsumer(side),
+                side -> side != null && sideIsOutput(side),
+                side -> structure == null || !structure.isFormed() ? Collections.emptyList() : structure.getEnergyContainers(side)
+        );
     }
 
     @Override
@@ -75,19 +83,15 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
     @Override
     public void onUpdateServer() {
         super.onUpdateServer();
-        if (structure != null && mode) {
+        if (structure != null && structure.isFormed() && mode && getEnergy() > 0) {
             CableUtils.emit(this);
         }
-        int newRedstoneLevel = getRedstoneLevel();
-        if (newRedstoneLevel != currentRedstoneLevel) {
-            updateComparatorOutputLevelSync();
-            currentRedstoneLevel = newRedstoneLevel;
-        }
+        updateSharedComparatorSignal();
     }
 
     @Override
     public boolean sideIsOutput(EnumFacing side) {
-        if (structure != null && mode) {
+        if (structure != null && structure.isFormed() && mode) {
             return !structure.locations.contains(Coord4D.get(this).offset(side));
         }
         return false;
@@ -95,39 +99,28 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
 
     @Override
     public boolean sideIsConsumer(EnumFacing side) {
-        return (structure != null && !mode);
+        return (structure != null && structure.isFormed() && !mode);
     }
 
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public void register() {
-        if (!isRemote()) {
-            IEnergyTile registered = EnergyNet.instance.getTile(world, getPos());
-            if (registered != this) {
-                if (registered != null && ic2Registered) {
-                    MinecraftForge.EVENT_BUS.post(new EnergyTileUnloadEvent(registered));
-                    ic2Registered = false;
-                } else {
-                    MinecraftForge.EVENT_BUS.post(new EnergyTileLoadEvent(this));
-                    ic2Registered = true;
-                }
-            }
+        if (world != null && !world.isRemote && !ic2Registered) {
+            MinecraftForge.EVENT_BUS.post(new EnergyTileLoadEvent(this));
+            ic2Registered = true;
         }
     }
 
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public void deregister() {
-        if (!isRemote()) {
-            IEnergyTile registered = EnergyNet.instance.getTile(world, getPos());
-            if (registered != null && ic2Registered) {
-                MinecraftForge.EVENT_BUS.post(new EnergyTileUnloadEvent(registered));
-                ic2Registered = false;
-            }
+        if (world != null && !world.isRemote && ic2Registered) {
+            MinecraftForge.EVENT_BUS.post(new EnergyTileUnloadEvent(this));
+            ic2Registered = false;
         }
     }
 
     @Override
     public double getMaxOutput() {
-        return structure != null ? structure.getRemainingOutput() : 0;
+        return structure != null && structure.isFormed() ? structure.getRemainingOutput() : 0;
     }
 
     @Override
@@ -188,21 +181,19 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int receiveEnergy(EnumFacing from, int maxReceive, boolean simulate) {
-        if (sideIsConsumer(from)) {
-            double received = addEnergy(RFIntegration.fromRF(maxReceive), simulate);
-            return RFIntegration.toRF(received);
-        }
-        return 0;
+        return (int) transferEnergyUnits(from, maxReceive, RFIntegration.fromRF(1), true, simulate);
     }
 
     @Override
     @Method(modid = MekanismHooks.REDSTONEFLUX_MOD_ID)
     public int extractEnergy(EnumFacing from, int maxExtract, boolean simulate) {
-        if (sideIsOutput(from)) {
-            double sent = removeEnergy(RFIntegration.fromRF(maxExtract), simulate);
-            return RFIntegration.toRF(sent);
-        }
-        return 0;
+        return (int) transferEnergyUnits(from, maxExtract, 1 / RFIntegration.toRFAsDouble(1), false, simulate);
+    }
+
+    @Override
+    public long transferEnergyUnits(EnumFacing side, long maximum, double factor, boolean input, boolean simulate) {
+        if (structure == null || !(input ? sideIsConsumer(side) : sideIsOutput(side))) return 0;
+        return structure.transferWholeUnits(maximum, factor, input, simulate);
     }
 
     @Override
@@ -226,13 +217,13 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public int getSinkTier() {
-        return 4;
+        return IC2Integration.getConfiguredInputTier();
     }
 
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public int getSourceTier() {
-        return 4;
+        return IC2Integration.getOutputTierForJoules(getMaxOutput());
     }
 
     @Override
@@ -293,7 +284,7 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public double getDemandedEnergy() {
-        return IC2Integration.toEU(getMaxEnergy() - getEnergy());
+        return structure != null && structure.isFormed() ? IC2Integration.toEU(getMaxEnergy() - getEnergy()) : 0;
     }
 
     @Override
@@ -316,11 +307,12 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
     @Override
     @Method(modid = MekanismHooks.IC2_MOD_ID)
     public double injectEnergy(EnumFacing direction, double amount, double voltage) {
+        if (direction == null || !sideIsConsumer(direction)) return amount;
         TileEntity tile = MekanismUtils.getTileEntity(world, getPos().offset(direction));
         if (tile == null || CapabilityUtils.hasCapability(tile, Capabilities.GRID_TRANSMITTER_CAPABILITY, direction.getOpposite())) {
             return amount;
         }
-        return amount - IC2Integration.toEU(acceptEnergy(direction, IC2Integration.fromEU(amount), false));
+        return structure.insertConverted(amount, IC2Integration.fromEU(1), false);
     }
 
     @Override
@@ -379,17 +371,11 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
 
     @Override
     public boolean hasCapability(@Nonnull Capability<?> capability, EnumFacing facing) {
-        return capability == Capabilities.ENERGY_STORAGE_CAPABILITY || capability == Capabilities.ENERGY_ACCEPTOR_CAPABILITY
-                || capability == Capabilities.ENERGY_OUTPUTTER_CAPABILITY || capability == Capabilities.CONFIGURABLE_CAPABILITY
-                || capability == CapabilityEnergy.ENERGY || isTesla(capability, facing) || super.hasCapability(capability, facing);
+        return capability == CapabilityEnergy.ENERGY || isTesla(capability, facing) || super.hasCapability(capability, facing);
     }
 
     @Override
     public <T> T getCapability(@Nonnull Capability<T> capability, EnumFacing facing) {
-        if (capability == Capabilities.ENERGY_STORAGE_CAPABILITY || capability == Capabilities.ENERGY_ACCEPTOR_CAPABILITY ||
-                capability == Capabilities.ENERGY_OUTPUTTER_CAPABILITY || capability == Capabilities.CONFIGURABLE_CAPABILITY) {
-            return (T) this;
-        }
         if (isTesla(capability, facing)) {
             return (T) teslaManager.getWrapper(this, facing);
         }
@@ -404,33 +390,25 @@ public class TileEntityInductionPort extends TileEntityInductionCasing implement
                 || (capability == Capabilities.TESLA_PRODUCER_CAPABILITY && sideIsOutput(side));
     }
 
-    @Nonnull
     @Override
-    public int[] getSlotsForFace(@Nonnull EnumFacing side) {
-        //Inserting into input make it draw power from the item inserted
-        return (!isRemote() && structure != null) || (isRemote() && clientHasStructure) ? mode ? CHARGE_SLOT : DISCHARGE_SLOT : InventoryUtils.EMPTY;
+    protected boolean exposesInventoryToAutomation() {
+        return true;
     }
 
     @Override
-    public boolean isItemValidForSlot(int slot, @Nonnull ItemStack stack) {
-        if (slot == 0) {
-            return ChargeUtils.canBeCharged(stack);
-        } else if (slot == 1) {
-            return ChargeUtils.canBeDischarged(stack);
-        }
-        return false;
-    }
-
-    @Override
-    public boolean isCapabilityDisabled(@Nonnull Capability<?> capability, EnumFacing side) {
-        if (capability == CapabilityItemHandler.ITEM_HANDLER_CAPABILITY) {
-            return !isRemote() ? structure == null : !clientHasStructure;
-        }
-        return super.isCapabilityDisabled(capability, side);
+    public boolean isComparatorInput(mekanism.api.transmitters.TransmissionType type) {
+        return type == mekanism.api.transmitters.TransmissionType.ENERGY;
     }
 
     @Override
     public int getRedstoneLevel() {
-        return MekanismUtils.redstoneLevelFromContents(getEnergy(), getMaxEnergy());
+        return structure == null ? 0 : structure.getCurrentRedstoneLevel();
     }
+
+    @Override
+    public int getCurrentRedstoneLevel() {
+        return supportsComparator() ? getRedstoneLevel() : 0;
+    }
+
+
 }

@@ -41,7 +41,7 @@ public class TankUpdateProtocol extends UpdateProtocol<SynchronizedTankData> {
 
     @Override
     protected SynchronizedTankData getNewStructure() {
-        return new SynchronizedTankData();
+        return new SynchronizedTankData((TileEntityDynamicTank) pointer);
     }
 
     @Override
@@ -53,33 +53,41 @@ public class TankUpdateProtocol extends UpdateProtocol<SynchronizedTankData> {
     protected void mergeCaches(List<ItemStack> rejectedItems, MultiblockCache<SynchronizedTankData> cache, MultiblockCache<SynchronizedTankData> merge) {
         TankCache tankCache = (TankCache) cache;
         TankCache mergeCache = (TankCache) merge;
-        if (tankCache.fluid == null) {
-            tankCache.fluid = mergeCache.fluid;
-        } else if (mergeCache.fluid != null && tankCache.fluid.isFluidEqual(mergeCache.fluid)) {
-            tankCache.fluid.amount += mergeCache.fluid.amount;
+        // Dynamic tank is single-medium: keep one type and only merge matching stacks.
+        if (tankCache.fluid != null && tankCache.gas != null) {
+            if (tankCache.fluid.amount >= tankCache.gas.amount) {
+                tankCache.gas = null;
+            } else {
+                tankCache.fluid = null;
+            }
         }
-        if (tankCache.gas == null) {
-            tankCache.gas = mergeCache.gas;
-        } else if (mergeCache.gas != null && tankCache.gas.isGasEqual(mergeCache.gas)) {
-            tankCache.gas.amount += mergeCache.gas.amount;
+        if (tankCache.fluid != null) {
+            tankCache.fluid = mergeFluidStack(tankCache.fluid, mergeCache.fluid);
+        } else if (tankCache.gas != null) {
+            tankCache.gas = mergeGasStack(tankCache.gas, mergeCache.gas);
+        } else if (mergeCache.fluid != null && mergeCache.gas != null) {
+            if (mergeCache.fluid.amount >= mergeCache.gas.amount) {
+                tankCache.fluid = mergeCache.fluid.copy();
+            } else {
+                tankCache.gas = mergeCache.gas.copy();
+            }
+        } else if (mergeCache.fluid != null) {
+            tankCache.fluid = mergeCache.fluid.copy();
+        } else if (mergeCache.gas != null) {
+            tankCache.gas = mergeCache.gas.copy();
         }
         tankCache.editMode = mergeCache.editMode;
-        List<ItemStack> rejects = StackUtils.getMergeRejects(tankCache.inventory, mergeCache.inventory);
+        List<ItemStack> rejects = StackUtils.getMergeRejects(tankCache.getInventorySlots(null), mergeCache.getInventorySlots(null));
         if (!rejects.isEmpty()) {
             rejectedItems.addAll(rejects);
         }
-        StackUtils.merge(tankCache.inventory, mergeCache.inventory);
+        StackUtils.merge(tankCache.getInventorySlots(null), mergeCache.getInventorySlots(null));
     }
 
     @Override
     protected void onFormed() {
         super.onFormed();
-        if (structureFound.fluidStored != null) {
-            structureFound.fluidStored.amount = Math.min(structureFound.fluidStored.amount, structureFound.volume * FLUID_PER_TANK);
-        }
-        if (structureFound.gasstored != null) {
-            structureFound.gasstored.amount = Math.min(structureFound.gasstored.amount, structureFound.volume * FLUID_PER_TANK);
-        }
+        structureFound.clampStoredSubstancesToCapacity();
     }
 
     @Override

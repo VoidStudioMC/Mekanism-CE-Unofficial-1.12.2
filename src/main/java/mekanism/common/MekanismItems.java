@@ -1,9 +1,11 @@
 package mekanism.common;
 
 import mekanism.api.EnumColor;
+import mekanism.common.content.qio.QIODriveSpecializations;
 import mekanism.common.item.*;
 import mekanism.common.item.armor.*;
 import mekanism.common.tier.AlloyTier;
+import mekanism.common.tier.QIODriveTier;
 import net.minecraft.inventory.EntityEquipmentSlot;
 import net.minecraft.item.EnumRarity;
 import net.minecraft.item.Item;
@@ -34,7 +36,7 @@ public class MekanismItems {
     public static final Item GasUpgrade = new ItemUpgrade(Upgrade.GAS);
     public static final Item StoneGeneratorUpgrade = new ItemUpgrade(Upgrade.STONE_GENERATOR);
     public static final Item AnchorUpgrade = new ItemUpgrade(Upgrade.ANCHOR);
-    public static final Item ThreadUpgrade = new ItemUpgrade(Upgrade.THREAD);
+    public static final Item ComparatorUpgrade = new ItemUpgrade(Upgrade.COMPARATOR);
     public static final Item TierInstaller = new ItemTierInstaller();
     public static final ItemEnergized EnergyTablet = new ItemEnergized();
     public static final ItemRobit Robit = new ItemRobit();
@@ -56,6 +58,28 @@ public class MekanismItems {
     public static final ItemJetpack ArmoredJetpack = new ItemJetpack();
     public static final ItemFreeRunners FreeRunners = new ItemFreeRunners();
     public static final Item Balloon = new ItemBalloon();
+
+    // QIO drives keep their contents in world-scoped external storage.
+    public static final ItemQIODrive BASE_QIO_DRIVE = new ItemQIODrive(QIODriveTier.BASE);
+    public static final ItemQIODrive HYPER_DENSE_QIO_DRIVE = new ItemQIODrive(QIODriveTier.HYPER_DENSE);
+    public static final ItemQIODrive TIME_DILATING_QIO_DRIVE = new ItemQIODrive(QIODriveTier.TIME_DILATING);
+    public static final ItemQIODrive SUPERMASSIVE_QIO_DRIVE = new ItemQIODrive(QIODriveTier.SUPERMASSIVE);
+
+    public static final ItemQIODrive BASE_ITEM_QIO_DRIVE = new ItemQIODrive(QIODriveTier.BASE, QIODriveSpecializations.ITEM);
+    public static final ItemQIODrive HYPER_DENSE_ITEM_QIO_DRIVE = new ItemQIODrive(QIODriveTier.HYPER_DENSE, QIODriveSpecializations.ITEM);
+    public static final ItemQIODrive TIME_DILATING_ITEM_QIO_DRIVE = new ItemQIODrive(QIODriveTier.TIME_DILATING, QIODriveSpecializations.ITEM);
+    public static final ItemQIODrive SUPERMASSIVE_ITEM_QIO_DRIVE = new ItemQIODrive(QIODriveTier.SUPERMASSIVE, QIODriveSpecializations.ITEM);
+
+    public static final ItemQIODrive BASE_FLUID_QIO_DRIVE = new ItemQIODrive(QIODriveTier.BASE, QIODriveSpecializations.FLUID);
+    public static final ItemQIODrive HYPER_DENSE_FLUID_QIO_DRIVE = new ItemQIODrive(QIODriveTier.HYPER_DENSE, QIODriveSpecializations.FLUID);
+    public static final ItemQIODrive TIME_DILATING_FLUID_QIO_DRIVE = new ItemQIODrive(QIODriveTier.TIME_DILATING, QIODriveSpecializations.FLUID);
+    public static final ItemQIODrive SUPERMASSIVE_FLUID_QIO_DRIVE = new ItemQIODrive(QIODriveTier.SUPERMASSIVE, QIODriveSpecializations.FLUID);
+
+    public static final ItemQIODrive BASE_GAS_QIO_DRIVE = new ItemQIODrive(QIODriveTier.BASE, QIODriveSpecializations.GAS);
+    public static final ItemQIODrive HYPER_DENSE_GAS_QIO_DRIVE = new ItemQIODrive(QIODriveTier.HYPER_DENSE, QIODriveSpecializations.GAS);
+    public static final ItemQIODrive TIME_DILATING_GAS_QIO_DRIVE = new ItemQIODrive(QIODriveTier.TIME_DILATING, QIODriveSpecializations.GAS);
+    public static final ItemQIODrive SUPERMASSIVE_GAS_QIO_DRIVE = new ItemQIODrive(QIODriveTier.SUPERMASSIVE, QIODriveSpecializations.GAS);
+    public static final ItemPortableQIODashboard PORTABLE_QIO_DASHBOARD = new ItemPortableQIODashboard();
 
     //Multi-ID Items
     public static final Item OtherDust = new ItemOtherDust();
@@ -96,7 +120,7 @@ public class MekanismItems {
 
     public static final ItemModule MODULE_ENERGY = new ItemModule(MekanismModules.ENERGY_UNIT);
     public static final ItemModule MODULE_MAGNETIC = new ItemModule(MekanismModules.MAGNETIC_UNIT);
-    //public static final ItemModule MODULE_COLOR_MODULATION = new ItemModule(MekanismModules.COLOR_MODULATION_UNIT);
+    public static final ItemModule MODULE_COLOR_MODULATION = new ItemModule(MekanismModules.COLOR_MODULATION_UNIT);
     public static final ItemModule MODULE_LASER_DISSIPATION = new ItemModule(MekanismModules.LASER_DISSIPATION_UNIT);
     public static final ItemModule MODULE_RADIATION_SHIELDING = new ItemModule(MekanismModules.RADIATION_SHIELDING_UNIT);
 
@@ -109,6 +133,7 @@ public class MekanismItems {
     public static final ItemModule MODULE_BLASTING = new ItemModule(MekanismModules.BLASTING_UNIT);
     public static final ItemModule MODULE_VEIN_MINING = new ItemModule(MekanismModules.VEIN_MINING_UNIT);
     public static final ItemModule MODULE_TELEPORTATION = new ItemModule(MekanismModules.TELEPORTATION_UNIT);
+    public static final ItemModule MODULE_LASER_CUTTER = new ItemModule(MekanismModules.LASER_CUTTER_UNIT);
 
     public static final ItemModule MODULE_ELECTROLYTIC_BREATHING = new ItemModule(MekanismModules.ELECTROLYTIC_BREATHING_UNIT);
     public static final ItemModule MODULE_INHALATION_PURIFICATION = new ItemModule(MekanismModules.INHALATION_PURIFICATION_UNIT);
@@ -134,7 +159,7 @@ public class MekanismItems {
 
     public static final Item HDPE_REINFORCED_ELYTRA = new ItemHDPEElytra();
     public static final ItemMekaTool MEKA_TOOL = new ItemMekaTool();
-
+    public static final ItemMekaFishingRod MEKA_FISHING_ROD = new ItemMekaFishingRod();
     public static final ItemModule MODULE_HEALTH_REGENERATION = new ItemModule(MekanismModules.HEALTH_REGENERATION_UNIT);
 
     public static final Item HDPE_PELLET = new ItemMekanism().setRarity(EnumRarity.UNCOMMON);
@@ -154,6 +179,12 @@ public class MekanismItems {
     public static final Item HAZMAT_GOWN = new ItemHazmatSuitArmor(1, EntityEquipmentSlot.CHEST);
     public static final Item HAZMAT_PANTS = new ItemHazmatSuitArmor(2, EntityEquipmentSlot.LEGS);
     public static final Item HAZMAT_BOOTS = new ItemHazmatSuitArmor(3, EntityEquipmentSlot.FEET);
+
+
+    public static final ItemModule MODULE_FISHING_COLLECTING = new ItemModule(MekanismModules.FISHING_COLLECTING_UNIT);
+    public static final ItemModule MODULE_FISHING_SPEED = new ItemModule(MekanismModules.FISHING_SPEED_UNIT);
+    public static final ItemModule MODULE_FISHING_INTELLIGENT = new ItemModule(MekanismModules.FISHING_INTELLIGENT_UNIT);
+    public static final ItemModule MODULE_FISHING_MULTIPLE = new ItemModule(MekanismModules.FISHING_MULTIPLE_UNIT);
     /**
      * ADD END
      */
@@ -177,7 +208,7 @@ public class MekanismItems {
         registry.register(init(GasUpgrade, "GasUpgrade"));
         registry.register(init(AnchorUpgrade, "AnchorUpgrade"));
         registry.register(init(StoneGeneratorUpgrade, "StoneGeneratorUpgrade"));
-        registry.register(init(ThreadUpgrade, "ThreadUpgrade"));
+        registry.register(init(ComparatorUpgrade, "ComparatorUpgrade"));
         registry.register(init(Robit, "Robit"));
         registry.register(init(AtomicDisassembler, "AtomicDisassembler"));
         registry.register(init(EnrichedAlloy, "EnrichedAlloy"));
@@ -203,6 +234,23 @@ public class MekanismItems {
         registry.register(init(GasMask, "GasMask"));
         registry.register(init(ScubaTank, "ScubaTank"));
         registry.register(init(Balloon, "Balloon"));
+        registry.register(init(BASE_QIO_DRIVE, "qio_drive_base"));
+        registry.register(init(HYPER_DENSE_QIO_DRIVE, "qio_drive_hyper_dense"));
+        registry.register(init(TIME_DILATING_QIO_DRIVE, "qio_drive_time_dilating"));
+        registry.register(init(SUPERMASSIVE_QIO_DRIVE, "qio_drive_supermassive"));
+        registry.register(init(BASE_ITEM_QIO_DRIVE, "qio_drive_base_item"));
+        registry.register(init(HYPER_DENSE_ITEM_QIO_DRIVE, "qio_drive_hyper_dense_item"));
+        registry.register(init(TIME_DILATING_ITEM_QIO_DRIVE, "qio_drive_time_dilating_item"));
+        registry.register(init(SUPERMASSIVE_ITEM_QIO_DRIVE, "qio_drive_supermassive_item"));
+        registry.register(init(BASE_FLUID_QIO_DRIVE, "qio_drive_base_fluid"));
+        registry.register(init(HYPER_DENSE_FLUID_QIO_DRIVE, "qio_drive_hyper_dense_fluid"));
+        registry.register(init(TIME_DILATING_FLUID_QIO_DRIVE, "qio_drive_time_dilating_fluid"));
+        registry.register(init(SUPERMASSIVE_FLUID_QIO_DRIVE, "qio_drive_supermassive_fluid"));
+        registry.register(init(BASE_GAS_QIO_DRIVE, "qio_drive_base_gas"));
+        registry.register(init(HYPER_DENSE_GAS_QIO_DRIVE, "qio_drive_hyper_dense_gas"));
+        registry.register(init(TIME_DILATING_GAS_QIO_DRIVE, "qio_drive_time_dilating_gas"));
+        registry.register(init(SUPERMASSIVE_GAS_QIO_DRIVE, "qio_drive_supermassive_gas"));
+        registry.register(init(PORTABLE_QIO_DASHBOARD, "portable_qio_dashboard"));
         registry.register(init(Shard, "Shard"));
         registry.register(init(ElectrolyticCore, "ElectrolyticCore"));
         registry.register(init(Sawdust, "Sawdust"));
@@ -235,10 +283,6 @@ public class MekanismItems {
         registry.register(init(YellowCakeUranium, "YellowCakeUranium"));
         registry.register(init(PoloniumPellet, "PoloniumPellet"));
         registry.register(init(ArmoredFreeRunners, "ArmoredFreeRunners"));
-        //  registry.register(init(MekAsuitHelmet, "MekAsuitHelmet"));
-        //  registry.register(init(MekAsuitChestplate, "MekAsuitChestplate"));
-        //  registry.register(init(MekAsuitLeggings, "MekAsuitLeggings"));
-        //  registry.register(init(MekAsuitBoots, "MekAsuitBoots"));
         registry.register(init(ModuleBase, "ModuleBase"));
 
         registry.register(init(MEKASUIT_HELMET, "mekasuit_helmet"));
@@ -248,8 +292,7 @@ public class MekanismItems {
 
         registry.register(initModule(MODULE_ENERGY));
         registry.register(initModule(MODULE_MAGNETIC));
-
-        // registry.register(initModule(MODULE_COLOR_MODULATION));
+        registry.register(initModule(MODULE_COLOR_MODULATION));
         registry.register(initModule(MODULE_LASER_DISSIPATION));
         registry.register(initModule(MODULE_RADIATION_SHIELDING));
 
@@ -262,6 +305,9 @@ public class MekanismItems {
         registry.register(initModule(MODULE_BLASTING));
         registry.register(initModule(MODULE_VEIN_MINING));
         registry.register(initModule(MODULE_TELEPORTATION));
+        if (Mekanism.hooks.FarmersDelightLegacyLoaded) {
+            registry.register(initModule(MODULE_LASER_CUTTER));
+        }
 
         registry.register(initModule(MODULE_ELECTROLYTIC_BREATHING));
         registry.register(initModule(MODULE_INHALATION_PURIFICATION));
@@ -285,6 +331,7 @@ public class MekanismItems {
             registry.register(init(HDPE_REINFORCED_ELYTRA, "hdpe_elytra"));
         }
         registry.register(init(MEKA_TOOL, "meka_tool"));
+        registry.register(init(MEKA_FISHING_ROD, "mekafishingrod"));
         registry.register(initModule(MODULE_HEALTH_REGENERATION));
         registry.register(init(HDPE_PELLET, "hdpe_pellet"));
         registry.register(init(HDPE_ROD, "hdpe_rod"));
@@ -302,6 +349,11 @@ public class MekanismItems {
         registry.register(init(HAZMAT_GOWN, "hazmat_gown"));
         registry.register(init(HAZMAT_PANTS, "hazmat_pants"));
         registry.register(init(HAZMAT_BOOTS, "hazmat_boots"));
+
+        registry.register(initModule(MODULE_FISHING_COLLECTING));
+        registry.register(initModule(MODULE_FISHING_SPEED));
+        registry.register(initModule(MODULE_FISHING_INTELLIGENT));
+        registry.register(initModule(MODULE_FISHING_MULTIPLE));
         /**
          * ADD END
          */

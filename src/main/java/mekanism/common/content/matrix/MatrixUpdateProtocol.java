@@ -45,7 +45,7 @@ public class MatrixUpdateProtocol extends UpdateProtocol<SynchronizedMatrixData>
 
     @Override
     protected SynchronizedMatrixData getNewStructure() {
-        return new SynchronizedMatrixData();
+        return new SynchronizedMatrixData((TileEntityInductionCasing) pointer);
     }
 
     @Override
@@ -57,17 +57,17 @@ public class MatrixUpdateProtocol extends UpdateProtocol<SynchronizedMatrixData>
     protected void mergeCaches(List<ItemStack> rejectedItems, MultiblockCache<SynchronizedMatrixData> cache, MultiblockCache<SynchronizedMatrixData> merge) {
         MatrixCache matrixCache = (MatrixCache) cache;
         MatrixCache mergeCache = (MatrixCache) merge;
-        List<ItemStack> rejects = StackUtils.getMergeRejects(matrixCache.inventory, mergeCache.inventory);
+        List<ItemStack> rejects = StackUtils.getMergeRejects(matrixCache.getInventorySlots(null), mergeCache.getInventorySlots(null));
         if (!rejects.isEmpty()) {
             rejectedItems.addAll(rejects);
         }
-        StackUtils.merge(matrixCache.inventory, mergeCache.inventory);
+        StackUtils.merge(matrixCache.getInventorySlots(null), mergeCache.getInventorySlots(null));
     }
 
     @Override
     protected void onStructureDestroyed(SynchronizedMatrixData structure) {
         //Save all energy changes before destroying the structure
-        structure.tick(pointer.getWorld());
+        structure.flushEnergy();
         super.onStructureDestroyed(structure);
     }
 
@@ -76,7 +76,7 @@ public class MatrixUpdateProtocol extends UpdateProtocol<SynchronizedMatrixData>
         for (Coord4D coord : innerNodes) {
             TileEntity tile = coord.getTileEntity(pointer.getWorld());
             if (tile instanceof TileEntityInductionCell cell) {
-                structure.addCell(coord,cell);
+                structure.addCell(coord, cell);
             } else if (tile instanceof TileEntityInductionProvider provider) {
                 structure.addProvider(coord, provider);
             }

@@ -1,26 +1,25 @@
 package mekanism.multiblockmachine.common.item;
 
 import mekanism.api.EnumColor;
-import mekanism.api.energy.IEnergizedItem;
 import mekanism.client.MekKeyHandler;
 import mekanism.client.MekanismClient;
 import mekanism.client.MekanismKeyHandler;
 import mekanism.common.Upgrade;
-import mekanism.common.base.*;
+import mekanism.common.base.ISustainedInventory;
+import mekanism.common.base.ISustainedTank;
 import mekanism.common.config.MekanismConfig;
+import mekanism.common.item.interfaces.IItemBlockPlacementData;
+import mekanism.common.item.interfaces.IItemSustainedInventory;
 import mekanism.common.security.ISecurityItem;
 import mekanism.common.security.ISecurityTile;
-import mekanism.common.tile.prefab.TileEntityBasicBlock;
-import mekanism.common.util.ItemDataUtils;
-import mekanism.common.util.LangUtils;
-import mekanism.common.util.MekanismUtils;
-import mekanism.common.util.SecurityUtils;
+import mekanism.common.util.*;
 import mekanism.multiblockmachine.common.MekanismMultiblockMachine;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.settings.GameSettings;
 import net.minecraft.client.util.ITooltipFlag;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.item.ItemBlock;
 import net.minecraft.item.ItemStack;
@@ -37,7 +36,7 @@ import javax.annotation.Nonnull;
 import java.util.List;
 import java.util.UUID;
 
-public abstract class ItemBlockLargeBase extends ItemBlock implements ISustainedInventory, ISecurityItem {
+public abstract class ItemBlockLargeBase extends ItemBlock implements IItemSustainedInventory, ISecurityItem, IItemBlockPlacementData {
 
     public String name;
 
@@ -73,7 +72,7 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
                     }
                 }
             }
-            addInformation(itemstack,list,world,flag);
+            addInformation(itemstack, list, world, flag);
             if (itemstack.getItem() instanceof ISustainedTank tank && itemstack.getCount() <= 1) {
                 FluidStack fluidStack = tank.getFluidStack(itemstack);
                 if (fluidStack != null && itemstack.getCount() <= 1) {
@@ -83,8 +82,8 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
             if (itemstack.getItem() instanceof ISustainedInventory inventory) {
                 list.add(EnumColor.AQUA + LangUtils.localize("tooltip.inventory") + ": " + EnumColor.GREY + LangUtils.transYesNo(inventory.getInventory(itemstack) != null && inventory.getInventory(itemstack).tagCount() != 0));
             }
-            if (ItemDataUtils.hasData(itemstack, "upgrades")) {
-                Upgrade.buildMap(ItemDataUtils.getDataMap(itemstack)).forEach((key, value) -> list.add(key.getColor() + "- " + key.getName() + (key.canMultiply() ? ": " + EnumColor.GREY + "x" + value : "")));
+            if (Upgrade.hasUpgradeData(ItemDataUtils.getDataMapIfPresent(itemstack))) {
+                Upgrade.buildComponentMap(ItemDataUtils.getDataMapIfPresent(itemstack)).forEach((key, value) -> list.add(key.getColor() + "- " + key.getName() + (key.canMultiply() ? ": " + EnumColor.GREY + "x" + value : "")));
             }
         } else {
             String getDescription = LangUtils.localize("tooltip." + name);
@@ -93,14 +92,11 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
     }
 
     @SideOnly(Side.CLIENT)
-    public void addInformation(ItemStack itemstack,List<String> list,World world,ITooltipFlag flag){
+    public void addInformation(ItemStack itemstack, List<String> list, World world, ITooltipFlag flag) {
     }
 
     @Override
     public boolean placeBlockAt(@Nonnull ItemStack stack, @Nonnull EntityPlayer player, World world, @Nonnull BlockPos pos, EnumFacing side, float hitX, float hitY, float hitZ, @Nonnull IBlockState state) {
-        if (stack.getCount() > 1 && MekanismConfig.current().mekce.StackingPlacementLimits.val()) {
-            return false;
-        }
         boolean place = true;
         Block block = world.getBlockState(pos).getBlock();
         if (!block.isReplaceable(world, pos)) {
@@ -109,46 +105,14 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
         if (canPlace(stack, player, world, pos, side, hitX, hitY, hitZ, state)) {
             place = false;
         }
-        if (place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state)) {
-            if (world.getTileEntity(pos) instanceof TileEntityBasicBlock tileEntity) {
-                if (tileEntity instanceof ISecurityTile security) {
-                    security.getSecurity().setOwnerUUID(getOwnerUUID(stack));
-                    if (hasSecurity(stack)) {
-                        security.getSecurity().setMode(getSecurity(stack));
-                    }
-                    if (getOwnerUUID(stack) == null) {
-                        security.getSecurity().setOwnerUUID(player.getUniqueID());
-                    }
-                }
-                if (tileEntity instanceof IUpgradeTile upgradeTile) {
-                    if (ItemDataUtils.hasData(stack, "upgrades")) {
-                        upgradeTile.getComponent().read(ItemDataUtils.getDataMap(stack));
-                    }
-                }
-                if (tileEntity instanceof ISideConfiguration config) {
-                    if (ItemDataUtils.hasData(stack, "sideDataStored")) {
-                        config.getConfig().read(ItemDataUtils.getDataMap(stack));
-                        config.getEjector().read(ItemDataUtils.getDataMap(stack));
-                    }
-                }
-                if (tileEntity instanceof ISustainedData data) {
-                    if (stack.getTagCompound() != null) {
-                        data.readSustainedData(stack);
-                    }
-                }
-                if (tileEntity instanceof IRedstoneControl redstoneControl) {
-                    if (ItemDataUtils.hasData(stack, "controlType")) {
-                        redstoneControl.setControlType(IRedstoneControl.RedstoneControl.values()[ItemDataUtils.getInt(stack, "controlType")]);
-                    }
-                }
-                if (tileEntity instanceof ISustainedInventory inventory) {
-                    inventory.setInventory(getInventory(stack));
-                }
-                addOtherMachine(tileEntity, stack, world);
-            }
-            return true;
-        }
-        return false;
+        return place && super.placeBlockAt(stack, player, world, pos, side, hitX, hitY, hitZ, state);
+    }
+
+    @Override
+    public void restorePlacementData(@Nonnull ItemStack stack, @Nonnull EntityLivingBase placer, @Nonnull World world, @Nonnull BlockPos pos,
+                                     @Nonnull TileEntity tileEntity) {
+        MekanismPlacementData.restoreCommon(stack, placer, tileEntity);
+        addOtherMachine(tileEntity, stack, world);
     }
 
     public void addOtherMachine(TileEntity tileEntity, ItemStack stack, World world) {
@@ -177,7 +141,7 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
     @Override
     public UUID getOwnerUUID(ItemStack stack) {
         if (ItemDataUtils.hasData(stack, "ownerUUID")) {
-            return UUID.fromString(ItemDataUtils.getString(stack, "ownerUUID"));
+            return MekanismUtils.parseUUID(ItemDataUtils.getString(stack, "ownerUUID"));
         }
         return null;
     }
@@ -196,7 +160,7 @@ public abstract class ItemBlockLargeBase extends ItemBlock implements ISustained
         if (!MekanismConfig.current().general.allowProtection.val()) {
             return ISecurityTile.SecurityMode.PUBLIC;
         }
-        return ISecurityTile.SecurityMode.values()[ItemDataUtils.getInt(stack, "security")];
+        return MekanismUtils.getByIndex(ISecurityTile.SecurityMode.values(), ItemDataUtils.getInt(stack, "security"), ISecurityTile.SecurityMode.PUBLIC);
     }
 
     @Override

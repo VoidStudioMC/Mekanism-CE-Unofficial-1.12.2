@@ -71,6 +71,9 @@ public class IngredientHelper {
     }
 
     public static boolean matches(Object input, IIngredient toMatch) {
+        if (toMatch == IngredientAny.INSTANCE) {
+            return true;
+        }
         return matches(getIngredient(input), toMatch);
     }
 
@@ -81,6 +84,9 @@ public class IngredientHelper {
             return matches(input.ingredient, toMatch.getIngredient());
         } else if (in instanceof FluidInput input) {
             return matches(input.ingredient, toMatch.getIngredient());
+        } else if (in instanceof FarmInput input) {
+            Object secondaryInput = input.isGasInput() ? input.gasInput : input.fluidInput;
+            return matches(input.itemStack, toMatch.getLeft()) && matches(secondaryInput, toMatch.getRight());
         } else if (in instanceof AdvancedMachineInput input) {
             return matches(input.itemStack, toMatch.getLeft()) && matches(input.gasType, toMatch.getRight());
         } else if (in instanceof ChemicalPairInput input) {
@@ -93,6 +99,8 @@ public class IngredientHelper {
             return matches(input.inputStack, toMatch.getIngredient()) && (toMatch.getInfuseType().isEmpty() || toMatch.getInfuseType().equalsIgnoreCase(input.infuse.getType().name));
         } else if (in instanceof GasAndFluidInput input) {
             return matches(input.ingredientGas, toMatch.getLeft()) && matches(input.ingredientFluid, toMatch.getRight());
+        } else if (in instanceof RotaryInput input) {
+            return matches(input.fluidInput, toMatch.getLeft()) && matches(input.gasInput, toMatch.getRight());
         } else if (in instanceof IntegerInput input) {
             return input.ingredient == toMatch.getAmount();
         }
@@ -108,10 +116,20 @@ public class IngredientHelper {
             return matches(output.output, toMatch.getIngredient());
         } else if (out instanceof ChanceOutput output) {
             return matches(output.primaryOutput, toMatch.getLeft()) && matches(output.secondaryOutput, toMatch.getRight());
+        } else if (out instanceof FarmOutput output) {
+            if (!matches(output.getGuaranteedOutput(), toMatch.getLeft())) {
+                return false;
+            }
+            if (toMatch.getRight() == IngredientAny.INSTANCE) {
+                return true;
+            }
+            return output.getChanceOutputs().stream().anyMatch(chanceOutput -> matches(chanceOutput.getOutput(), toMatch.getRight()));
         } else if (out instanceof ChemicalPairOutput output) {
             return matches(output.leftGas, toMatch.getLeft()) && matches(output.rightGas, toMatch.getRight());
         } else if (out instanceof PressurizedOutput output) {
             return matches(output.getItemOutput(), toMatch.getLeft()) && matches(output.getGasOutput(), toMatch.getRight());
+        } else if (out instanceof RotaryOutput output) {
+            return matches(output.gasOutput, toMatch.getLeft()) && matches(output.fluidOutput, toMatch.getRight());
         }
         return false;
     }
